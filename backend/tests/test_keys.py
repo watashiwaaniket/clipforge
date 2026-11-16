@@ -6,6 +6,7 @@ import logging
 import socket
 import time
 from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
 from uuid import UUID
 
 import httpx
@@ -18,7 +19,7 @@ from app.db import SessionLocal
 from app.logging import configure_logging
 from app.main import app
 from app.models import ApiKey, User
-from app.security import decrypt_api_key, hash_password
+from app.security import decrypt_api_key, encrypt_api_key, hash_password
 
 
 def _sk_canary() -> str:
@@ -57,11 +58,20 @@ def _sign_token(user_id: UUID) -> str:
 
 
 def _mock_public_dns(monkeypatch: pytest.MonkeyPatch, ip: str = "93.184.216.34") -> None:
+    real_getaddrinfo = socket.getaddrinfo
+
     def fake_getaddrinfo(
-        host: str, port: int, family: int = 0, type: int = 0
-    ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
+        host: str,
+        port: int | str | None,
+        family: int = 0,
+        type: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ):
+        if host in {"db", "redis"}:
+            return real_getaddrinfo(host, port, family, type, proto, flags)
         af = socket.AF_INET6 if ":" in ip else socket.AF_INET
-        return [(af, socket.SOCK_STREAM, 6, "", (ip, int(port)))]
+        return [(af, socket.SOCK_STREAM, 6, "", (ip, int(port or 443)))]
 
     monkeypatch.setattr("app.services.providers.socket.getaddrinfo", fake_getaddrinfo)
 
@@ -427,3 +437,187 @@ def test_canary_secrets_never_appear_in_logs_or_responses_on_exception(
     assert sk not in logs
     assert gsk not in logs
     assert "[REDACTED]" in logs
+
+
+def test_whitespace_key_query_fragment_and_non_completion_200_rejected(
+    client: TestClient,
+    auth_headers: tuple[dict[str, str], UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers, _ = auth_headers
+    _mock_public_dns(monkeypatch)
+
+    blank_key = client.post(
+        "/api/v1/keys",
+        headers=headers,
+        json={"provider": "openai", "api_key": "   \t  "},
+    )
+    assert blank_key.status_code == 400
+    assert blank_key.json()["detail"] == "API key cannot be empty."
+
+    for bad_url in (
+        "https://api.example.com/v1?token=1",
+        "https://api.example.com/v1#section",
+    ):
+        res = client.post(
+            "/api/v1/keys",
+            headers=headers,
+            json={
+                "provider": "compatible",
+                "api_key": _sk_canary(),
+                "base_url": bad_url,
+                "model": "custom-model",
+            },
+        )
+        assert res.status_code == 400, bad_url
+
+    for bad_resp in (
+        httpx.Response(200, text="<html>not json</html>", headers={"content-type": "text/html"}),
+        httpx.Response(200, json={}),
+    ):
+        _mock_httpx_client(monkeypatch, lambda _req, r=bad_resp: r)
+        res = client.post(
+            "/api/v1/keys",
+            headers=headers,
+            json={
+                "provider": "compatible",
+                "api_key": _sk_canary(),
+                "base_url": "https://api.example.com/v1",
+                "model": "custom-model",
+            },
+        )
+        assert res.status_code == 400
+        assert res.json()["detail"] == "That key was rejected by the provider."
+
+
+def test_compatible_url_normalization_model_override_and_get_strips_userinfo(
+    client: TestClient,
+    auth_headers: tuple[dict[str, str], UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers, user_id = auth_headers
+    _mock_public_dns(monkeypatch)
+
+    seen_urls: list[str] = []
+
+    def ok_handler(request: httpx.Request) -> httpx.Response:
+        seen_urls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "custom-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "pong"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    _mock_httpx_client(monkeypatch, ok_handler)
+
+    res = client.post(
+        "/api/v1/keys",
+        headers=headers,
+        json={
+            "provider": "compatible",
+            "api_key": _sk_canary(),
+            "base_url": "https://API.Example.COM.:8443/v1/",
+            "model": "custom-model",
+        },
+    )
+    assert res.status_code == 200
+    assert seen_urls[-1] == "https://api.example.com:8443/v1/chat/completions"
+
+    res_empty_port = client.post(
+        "/api/v1/keys",
+        headers=headers,
+        json={
+            "provider": "openai",
+            "api_key": _sk_canary(),
+            "model": "gpt-4o",
+        },
+    )
+    assert res_empty_port.status_code == 200
+    assert res_empty_port.json()["model"] == "gpt-4o"
+
+    res_colon = client.post(
+        "/api/v1/keys",
+        headers=headers,
+        json={
+            "provider": "compatible",
+            "api_key": _sk_canary(),
+            "base_url": "https://api.example.com:/v1",
+            "model": "custom-model",
+        },
+    )
+    assert res_colon.status_code == 200
+    meta = client.get("/api/v1/keys", headers=headers)
+    assert meta.status_code == 200
+    assert meta.json()["base_url"] == "https://api.example.com/v1"
+
+    # Defense-in-depth: even if a DB row contained userinfo, GET strips it.
+    with SessionLocal() as session:
+        row = session.scalar(select(ApiKey).where(ApiKey.user_id == user_id))
+        assert row is not None
+        row.base_url = "https://user:secret@api.example.com:8443/v1"
+        row.encrypted_key = encrypt_api_key(_sk_canary())
+        session.commit()
+
+    stripped = client.get("/api/v1/keys", headers=headers)
+    assert stripped.status_code == 200
+    assert stripped.json()["base_url"] == "https://api.example.com:8443/v1"
+
+
+def test_concurrent_key_upserts_succeed_with_single_row(
+    auth_headers: tuple[dict[str, str], UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers, user_id = auth_headers
+    _mock_public_dns(monkeypatch)
+
+    def ok_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "gpt-4o-mini",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "pong"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    _mock_httpx_client(monkeypatch, ok_handler)
+
+    def post_key(canary: str) -> int:
+        with TestClient(app) as tc:
+            res = tc.post(
+                "/api/v1/keys",
+                headers=headers,
+                json={"provider": "openai", "api_key": canary},
+            )
+            return res.status_code
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        statuses = list(
+            pool.map(post_key, [_sk_canary(), _gsk_canary(), _sk_canary(), _gsk_canary()])
+        )
+
+    assert statuses == [200, 200, 200, 200]
+    with SessionLocal() as session:
+        count = session.scalar(
+            select(func.count()).select_from(ApiKey).where(ApiKey.user_id == user_id)
+        )
+        assert count == 1

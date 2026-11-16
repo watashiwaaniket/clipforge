@@ -90,15 +90,21 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
+def _format_netloc(host: str, port: int | None) -> str:
+    formatted_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+    return f"{formatted_host}:{port}" if port is not None else formatted_host
+
+
 def strip_url_userinfo(url: str) -> str:
     parsed = urlsplit(url)
     if parsed.username is None and parsed.password is None and "@" not in parsed.netloc:
         return url
     host = parsed.hostname or ""
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
-    port = parsed.port
-    netloc = f"{host}:{port}" if port is not None else host
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    netloc = _format_netloc(host, port)
     return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
@@ -134,7 +140,7 @@ def check_outbound_url(base_url: str, *, provider: str = "compatible") -> str:
         normalized_path = parsed.path.rstrip("/")
         if normalized_path and not normalized_path.endswith("/v1"):
             raise ProviderConfigError("Ollama path must be empty or end in /v1.")
-        return urlunsplit(("http", parsed.netloc.lower(), normalized_path, "", ""))
+        return urlunsplit(("http", _format_netloc(host, port), normalized_path, "", ""))
 
     if scheme != "https":
         raise ProviderConfigError("Base URL must use https.")
@@ -167,7 +173,7 @@ def check_outbound_url(base_url: str, *, provider: str = "compatible") -> str:
             raise ProviderConfigError("Base URL resolved to a disallowed address.")
 
     normalized_path = parsed.path.rstrip("/")
-    return urlunsplit(("https", parsed.netloc.lower(), normalized_path, "", ""))
+    return urlunsplit(("https", _format_netloc(host, port), normalized_path, "", ""))
 
 
 def resolve_provider_config(

@@ -1,8 +1,12 @@
+from uuid import uuid4
+
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from openai import OpenAI
-from sqlalchemy import delete, select
+from openai.types.chat import ChatCompletion
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -43,11 +47,13 @@ def _validate_provider_key(
             http_client=http_client,
             max_retries=0,
         )
-        client.chat.completions.create(
+        response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": "ping"}],
             max_tokens=1,
         )
+        if not isinstance(response, ChatCompletion) or not response.choices:
+            raise ValueError("Provider returned an unexpected completion payload.")
 
 
 @router.post("", response_model=ApiKeyUpsertResponse)
@@ -99,16 +105,28 @@ def upsert_api_key(
         encrypted = encrypt_api_key(plaintext_key)
         del plaintext_key
 
-        session.execute(delete(ApiKey).where(ApiKey.user_id == user.id))
-        session.add(
-            ApiKey(
+        stmt = (
+            pg_insert(ApiKey)
+            .values(
+                id=uuid4(),
                 user_id=user.id,
                 provider=resolved.provider,
                 encrypted_key=encrypted,
                 base_url=resolved.base_url,
                 model=resolved.model,
             )
+            .on_conflict_do_update(
+                index_elements=[ApiKey.user_id],
+                set_={
+                    "provider": resolved.provider,
+                    "encrypted_key": encrypted,
+                    "base_url": resolved.base_url,
+                    "model": resolved.model,
+                    "updated_at": func.now(),
+                },
+            )
         )
+        session.execute(stmt)
         session.flush()
 
         return ApiKeyUpsertResponse(
