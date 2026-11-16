@@ -86,6 +86,7 @@ def test_scrypt_password_hashing_and_dummy_verify() -> None:
     assert verify_password("correct-horse-battery", stored) is True
     assert verify_password("wrong-password", stored) is False
     assert verify_password("anything", "not-scrypt") is False
+    assert verify_password("anything", "scrypt$0$8$1$AAAA$AAAA") is False
     verify_dummy_password("anything")
 
 
@@ -115,6 +116,11 @@ def test_decode_jwt_sub_validation_cases() -> None:
     with pytest.raises(ValueError):
         decode_jwt_sub(token, now_ts=int(now) + 3631)
 
+    # iat within +30s skew passes; past +30s skew fails.
+    assert decode_jwt_sub(token, now_ts=int(now) - 30) == UUID(sub)
+    with pytest.raises(ValueError):
+        decode_jwt_sub(token, now_ts=int(now) - 31)
+
     # alg=none
     h_none = _b64url(json.dumps({"alg": "none"}).encode("utf-8"))
     p_b64 = _b64url(json.dumps(base_payload).encode("utf-8"))
@@ -132,6 +138,31 @@ def test_decode_jwt_sub_validation_cases() -> None:
     )
     with pytest.raises(ValueError):
         decode_jwt_sub(bad_sig, now_ts=now)
+
+    # wrong signature byte length rejected
+    h_part, p_part, s_part = token.split(".")
+    with pytest.raises(ValueError):
+        decode_jwt_sub(f"{h_part}.{p_part}.{_b64url(b'x' * 31)}", now_ts=now)
+
+    # non-base64url characters rejected (spaces, padding)
+    with pytest.raises(ValueError):
+        decode_jwt_sub(f"{h_part}.{p_part}.{s_part}=", now_ts=now)
+    with pytest.raises(ValueError):
+        decode_jwt_sub(f"{h_part}.{p_part}. {s_part}", now_ts=now)
+
+    # wrong iss rejected
+    bad_iss = _sign_hs256(
+        {"alg": "HS256"}, {**base_payload, "iss": "other"}, settings.jwt_secret
+    )
+    with pytest.raises(ValueError):
+        decode_jwt_sub(bad_iss, now_ts=now)
+
+    # non-UUID sub rejected
+    bad_sub = _sign_hs256(
+        {"alg": "HS256"}, {**base_payload, "sub": "not-a-uuid"}, settings.jwt_secret
+    )
+    with pytest.raises(ValueError):
+        decode_jwt_sub(bad_sub, now_ts=now)
 
     # array aud rejected
     arr_aud = _sign_hs256(
