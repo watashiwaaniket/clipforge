@@ -4,6 +4,7 @@ import hmac
 import json
 import math
 import os
+import re
 import time
 from uuid import UUID
 
@@ -17,6 +18,8 @@ SCRYPT_R = 8
 SCRYPT_P = 1
 SCRYPT_DKLEN = 32
 SCRYPT_MAXMEM = 256 * 1024 * 1024
+
+_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Valid scrypt$131072$8$1$... hash so unknown-email logins still pay the scrypt cost.
 DUMMY_PASSWORD_HASH = (
@@ -86,13 +89,9 @@ def verify_password(password: str, stored_hash: str) -> bool:
         n, r, p = int(n_s), int(r_s), int(p_s)
         salt = base64.b64decode(salt_b64, validate=True)
         expected = base64.b64decode(hash_b64, validate=True)
-    except Exception:
-        return False
-
-    derived = _scrypt_derive(password, salt, n, r, p)
-    try:
+        derived = _scrypt_derive(password, salt, n, r, p)
         return hmac.compare_digest(derived, expected)
-    except TypeError:
+    except Exception:
         return False
 
 
@@ -121,7 +120,7 @@ def validate_email(raw_email: str) -> str:
 
 
 def _b64url_decode(segment: str) -> bytes:
-    if not segment or not segment.isascii():
+    if not segment or not _B64URL_RE.fullmatch(segment):
         raise InvalidJwtError("Invalid segment encoding.")
     padded = segment + "=" * (-len(segment) % 4)
     try:
