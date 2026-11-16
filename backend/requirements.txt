@@ -13,4 +13,4 @@ pytest>=8.3
 ruff>=0.8
 tenacity>=9
 openai>=1.58
-yt-dlp>=2025.1.15
+yt-dlp>=2025.1.15,<2027.1.1

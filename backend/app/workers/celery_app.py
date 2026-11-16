@@ -14,10 +14,21 @@ celery_app.conf.update(
     task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
     task_track_started=True,
+    task_ignore_result=True,
+    worker_hijack_root_logger=False,
+    worker_concurrency=1,
+    broker_transport_options={"visibility_timeout": 7200},
+    task_routes={
+        "process_job": {"queue": "celery"},
+    },
+    imports=["app.workers.pipeline"],
 )
 
 
 @worker_process_init.connect
 def on_worker_process_init(**_kwargs: object) -> None:
+    from app.workers.pipeline import init_worker_instance_id
+
+    init_worker_instance_id()
     validate_runtime_secrets()
     rebind_worker_engine()
