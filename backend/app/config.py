@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     min_free_disk_bytes: int = 8 * 1024 * 1024 * 1024
     openai_api_key: str = ""
     cors_origins: str = "http://localhost:3000"
+    allow_guest_auth: bool = False
 
     @property
     def cors_origin_list(self) -> list[str]:

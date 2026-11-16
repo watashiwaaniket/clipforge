@@ -25,6 +25,10 @@ class UserResponse(BaseModel):
     email: str
 
 
+class AuthConfigResponse(BaseModel):
+    guest_enabled: bool
+
+
 class ApiKeyUpsertRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

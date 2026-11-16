@@ -1,19 +1,24 @@
+from uuid import uuid4
+
 import redis
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_session
 from app.models import User
-from app.schemas import AuthRequest, UserResponse
+from app.schemas import AuthConfigResponse, AuthRequest, UserResponse
 from app.security import hash_password, validate_email, verify_dummy_password, verify_password
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
 AUTH_RATE_LIMIT_MAX = 10
 AUTH_RATE_LIMIT_WINDOW_S = 60
+LOCAL_GUEST_EMAIL = "local@clipforge.local"
+_UNUSABLE_PASSWORD_HASH = "!"
 
 _RATE_LIMIT_LUA = """
 local count = redis.call("INCR", KEYS[1])
@@ -58,6 +63,45 @@ def _enforce_auth_rate_limit(request: Request) -> None:
         )
 
 
+@router.get("/config", response_model=AuthConfigResponse)
+def auth_config() -> AuthConfigResponse:
+    return AuthConfigResponse(guest_enabled=settings.allow_guest_auth)
+
+
+@router.post("/guest", response_model=UserResponse)
+def guest_login(
+    request: Request,
+    session: Session = Depends(get_session),
+) -> UserResponse:
+    _enforce_auth_rate_limit(request)
+
+    if not settings.allow_guest_auth:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Guest access is disabled.",
+        )
+
+    stmt = (
+        pg_insert(User)
+        .values(
+            id=uuid4(),
+            email=LOCAL_GUEST_EMAIL,
+            password_hash=_UNUSABLE_PASSWORD_HASH,
+        )
+        .on_conflict_do_nothing(index_elements=[User.email])
+    )
+    session.execute(stmt)
+    session.flush()
+
+    user = session.scalar(select(User).where(User.email == LOCAL_GUEST_EMAIL))
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not initialize local workspace.",
+        )
+    return UserResponse(id=user.id, email=user.email)
+
+
 @router.post("/register", status_code=status.HTTP_201_CREATED, response_model=UserResponse)
 def register(
     body: AuthRequest,
@@ -78,6 +122,12 @@ def register(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Password must be at least 10 characters.",
+        )
+
+    if email == LOCAL_GUEST_EMAIL:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid email or password.",
         )
 
     existing = session.scalar(select(User).where(User.email == email))

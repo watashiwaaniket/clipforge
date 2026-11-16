@@ -19,6 +19,8 @@ Windows: `.\start.ps1`
 
 Requires: Docker, Node 18+, ffmpeg is bundled in the backend image.
 
+`.env.example` sets `ALLOW_GUEST_AUTH=true` so local clones can skip sign-in and jump straight into a local workspace. Set `ALLOW_GUEST_AUTH=false` for public/multi-user deployments.
+
 ## Stack
 
 Next.js + Tailwind · FastAPI · Celery + Redis · PostgreSQL · yt-dlp · Whisper · ffmpeg

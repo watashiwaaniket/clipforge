@@ -42,6 +42,27 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         return { id: data.id, email: data.email };
       },
     }),
+    Credentials({
+      id: "guest",
+      name: "Local guest",
+      credentials: {},
+      async authorize() {
+        const response = await fetch(`${apiUrl}/api/v1/auth/guest`, {
+          method: "POST",
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          return null;
+        }
+
+        const data = (await response.json()) as { id?: string; email?: string };
+        if (!data.id || !data.email) {
+          return null;
+        }
+        return { id: data.id, email: data.email };
+      },
+    }),
   ],
   callbacks: {
     ...authConfig.callbacks,
