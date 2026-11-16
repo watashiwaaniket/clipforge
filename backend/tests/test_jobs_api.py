@@ -304,3 +304,25 @@ def test_list_and_detail_omit_file_path_and_isolate_users(
     assert other_detail.status_code == 404
     assert other_detail.json()["detail"] == "Not found."
     assert client.get("/api/v1/jobs", headers=headers_b).json() == []
+
+
+def test_post_jobs_rejects_oversized_chunked_body_without_content_length(
+    client: TestClient,
+) -> None:
+    headers, _user_id = _create_user_with_key("chunked@example.com")
+    payload = json.dumps(
+        {"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "pad": "x" * 2100}
+    ).encode("utf-8")
+
+    def gen():
+        for i in range(0, len(payload), 256):
+            yield payload[i : i + 256]
+
+    res = client.post(
+        "/api/v1/jobs",
+        headers={**headers, "Content-Type": "application/json"},
+        content=gen(),
+    )
+    assert res.status_code == 422
+    assert res.json()["detail"] == "Request body too large."
+

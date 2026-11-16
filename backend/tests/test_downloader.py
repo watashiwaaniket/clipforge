@@ -193,3 +193,120 @@ def test_happy_path_download_and_mkv_remux(
     assert result.title == "GTA 6 Trailer Chaos"
     assert result.duration_s == 130.5
     assert result.thumbnail_url == "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"
+
+
+def test_probe_and_download_clears_stale_vod_before_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_dir = tmp_path / "job-stale"
+    job_dir.mkdir(parents=True)
+    stale_vod = job_dir / "vod.mp4"
+    stale_vod.write_bytes(b"corrupt-stale-bytes")
+
+    def fake_run(argv, **kwargs):
+        if "--dump-single-json" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    {
+                        "duration": 90.0,
+                        "title": "Fresh VOD",
+                        "extractor_key": "Youtube",
+                    }
+                ),
+                stderr="",
+            )
+        if argv[0] == "yt-dlp":
+            assert not stale_vod.exists()
+            stale_vod.write_bytes(b"fresh-mp4-bytes")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[0] == "ffprobe":
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps({"format": {"duration": "90.0"}}), stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {argv}")
+
+    monkeypatch.setattr("app.services.downloader.subprocess.run", fake_run)
+    result = probe_and_download("https://www.youtube.com/watch?v=dQw4w9WgXcQ", job_dir)
+    assert result.path.read_bytes() == b"fresh-mp4-bytes"
+
+
+def test_transient_ytdlp_error_retries_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_dir = tmp_path / "job-retry"
+    download_attempts = 0
+
+    def fake_run(argv, **kwargs):
+        nonlocal download_attempts
+        if "--dump-single-json" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    {
+                        "duration": 60.0,
+                        "title": "Retry VOD",
+                        "extractor_key": "Youtube",
+                    }
+                ),
+                stderr="",
+            )
+        if argv[0] == "yt-dlp":
+            download_attempts += 1
+            if download_attempts < 3:
+                raise subprocess.CalledProcessError(1, argv, stderr="HTTP Error 503: temporary")
+            (job_dir / "vod.mp4").write_bytes(b"recovered-bytes")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[0] == "ffprobe":
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps({"format": {"duration": "60.0"}}), stderr=""
+            )
+        raise AssertionError(f"Unexpected command: {argv}")
+
+    monkeypatch.setattr("tenacity.nap.time.sleep", lambda _s: None)
+    monkeypatch.setattr("app.services.downloader.subprocess.run", fake_run)
+
+    result = probe_and_download("https://www.youtube.com/watch?v=dQw4w9WgXcQ", job_dir)
+    assert download_attempts == 3
+    assert result.path.read_bytes() == b"recovered-bytes"
+
+
+def test_container_duration_exceeding_cap_deletes_file_and_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job_dir = tmp_path / "job-container-cap"
+
+    def fake_run(argv, **kwargs):
+        if "--dump-single-json" in argv:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps(
+                    {
+                        "duration": 120.0,
+                        "title": "Lying Container",
+                        "extractor_key": "Youtube",
+                    }
+                ),
+                stderr="",
+            )
+        if argv[0] == "yt-dlp":
+            (job_dir / "vod.mp4").write_bytes(b"too-long-mp4")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[0] == "ffprobe":
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps({"format": {"duration": str(241 * 60)}}),
+                stderr="",
+            )
+        raise AssertionError(f"Unexpected command: {argv}")
+
+    monkeypatch.setattr("app.services.downloader.subprocess.run", fake_run)
+    with pytest.raises(VodTooLong, match="max 240 min"):
+        probe_and_download("https://www.youtube.com/watch?v=dQw4w9WgXcQ", job_dir)
+
+    assert list(job_dir.glob("*")) == []
+

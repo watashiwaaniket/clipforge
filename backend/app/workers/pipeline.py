@@ -198,26 +198,33 @@ def begin_attempt(job_id: str) -> tuple[str, str | None]:
         process_job.apply_async(args=[str(uid)], countdown=15)
         return "skip", None
 
-    # 3. Increment attempt inside short FOR UPDATE transaction before any download.
-    with session_scope() as session:
-        job = session.get(Job, uid, with_for_update=True)
-        if job is None or job.status in {"completed", "failed"}:
+    try:
+        # 3. Increment attempt inside short FOR UPDATE transaction before any download.
+        with session_scope() as session:
+            job = session.get(Job, uid, with_for_update=True)
+            if job is None or job.status in {"completed", "failed"}:
+                release_job_lock(uid, lock_token)
+                return "skip", None
+            job.attempt += 1
+            job.updated_at = datetime.now(UTC)
+            attempt = job.attempt
+
+        # 4. Enforce attempt cap (3 executions allowed; 4th marks failed and cleans up).
+        if attempt > MAX_JOB_ATTEMPTS:
+            fail_job(
+                uid,
+                "worker_lost",
+                "The worker restarted while this job was running. Please try again.",
+            )
+            return "stop", lock_token
+
+        return "run", lock_token
+    except Exception:
+        try:
             release_job_lock(uid, lock_token)
-            return "skip", None
-        job.attempt += 1
-        job.updated_at = datetime.now(UTC)
-        attempt = job.attempt
-
-    # 4. Enforce attempt cap (3 executions allowed; 4th marks failed and cleans up).
-    if attempt > MAX_JOB_ATTEMPTS:
-        fail_job(
-            uid,
-            "worker_lost",
-            "The worker restarted while this job was running. Please try again.",
-        )
-        return "stop", lock_token
-
-    return "run", lock_token
+        except Exception:
+            log.warning("job_lock_release_failed", job_id=str(uid))
+        raise
 
 
 def _persist_download_metadata(

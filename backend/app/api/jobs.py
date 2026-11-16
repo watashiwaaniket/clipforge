@@ -1,3 +1,4 @@
+from contextlib import aclosing
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -40,12 +41,27 @@ async def enforce_max_job_body_size(request: Request) -> None:
                 )
         except ValueError:
             pass
-    body = await request.body()
-    if len(body) > MAX_CREATE_JOB_BODY_BYTES:
-        raise HTTPException(
-            status_code=422,
-            detail="Request body too large.",
-        )
+
+    if hasattr(request, "_body"):
+        if len(request._body) > MAX_CREATE_JOB_BODY_BYTES:
+            raise HTTPException(
+                status_code=422,
+                detail="Request body too large.",
+            )
+        return
+
+    total = 0
+    chunks: list[bytes] = []
+    async with aclosing(request.stream()) as stream:
+        async for chunk in stream:
+            total += len(chunk)
+            if total > MAX_CREATE_JOB_BODY_BYTES:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Request body too large.",
+                )
+            chunks.append(chunk)
+    request._body = b"".join(chunks)
 
 
 @router.post(

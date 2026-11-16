@@ -323,6 +323,7 @@ def probe_and_download(
         str(job_dir / "vod.%(ext)s"),
         url,
     ]
+    _cleanup_partial_vods(job_dir)
     _run_ytdlp_with_retries(download_argv, timeout=2400, job_dir=job_dir)
 
     vod_mp4 = job_dir / "vod.mp4"

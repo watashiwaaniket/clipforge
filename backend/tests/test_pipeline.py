@@ -180,3 +180,126 @@ def test_transition_job_enforces_forward_only(clean_db: None) -> None:
             transition_job(session, job, "downloading", "again")
         with pytest.raises(InvalidTransition):
             transition_job(session, job, "queued", "backwards")
+
+
+def test_run_pipeline_resumes_valid_vod_and_redownloads_corrupt_vod(
+    clean_db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
+    job_id = _seed_queued_job()
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.status = "downloading"
+        job.duration_s = 120.0
+        session.commit()
+
+    vod_file = tmp_path / "jobs" / job_id / "vod.mp4"
+    vod_file.parent.mkdir(parents=True, exist_ok=True)
+    vod_file.write_bytes(b"valid-vod")
+
+    # 1. Matching ffprobe duration skips probe_and_download
+    monkeypatch.setattr("app.workers.pipeline.probe_media_duration", lambda _p: 121.5)
+    monkeypatch.setattr(
+        "app.workers.pipeline.probe_and_download",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not download")),
+    )
+    process_job(job_id)
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.status == "failed"
+        assert job.error == "Download finished. Later stages are not included in this build yet."
+
+    # 2. Reset to downloading with unreadable vod.mp4 -> triggers download
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.status = "downloading"
+        job.error = None
+        job.finished_at = None
+        job.attempt = 0
+        session.commit()
+
+    vod_file.write_bytes(b"corrupt")
+    monkeypatch.setattr("app.workers.pipeline.probe_media_duration", lambda _p: None)
+    downloaded_urls: list[str] = []
+
+    def fake_probe_and_download(url: str, job_dir: Path, **_kwargs):
+        from app.services.downloader import DownloadResult
+
+        downloaded_urls.append(url)
+        out = job_dir / "vod.mp4"
+        out.write_bytes(b"re-downloaded")
+        return DownloadResult(
+            path=out,
+            platform="youtube",
+            title="Resumed VOD",
+            duration_s=120.0,
+            thumbnail_url=None,
+        )
+
+    monkeypatch.setattr("app.workers.pipeline.probe_and_download", fake_probe_and_download)
+    process_job(job_id)
+    assert len(downloaded_urls) == 1
+    assert vod_file.read_bytes() == b"re-downloaded"
+
+
+def test_process_job_at_attempt_cap_fails_without_downloading_and_releases_lock(
+    clean_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = _seed_queued_job()
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.attempt = 3
+        session.commit()
+
+    monkeypatch.setattr(
+        "app.workers.pipeline.probe_and_download",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not download")),
+    )
+    process_job(job_id)
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.attempt == 4
+        assert job.status == "failed"
+        assert job.error == "The worker restarted while this job was running. Please try again."
+
+    r = redis.Redis.from_url(settings.redis_url)
+    try:
+        assert r.get(f"joblock:{job_id}") is None
+    finally:
+        r.close()
+
+
+def test_begin_attempt_releases_lock_on_unexpected_exception(
+    clean_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_id = _seed_queued_job()
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.attempt = 3
+        session.commit()
+
+    monkeypatch.setattr(
+        "app.workers.pipeline.fail_job",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("db down")),
+    )
+
+    with pytest.raises(RuntimeError, match="db down"):
+        begin_attempt(job_id)
+
+    r = redis.Redis.from_url(settings.redis_url)
+    try:
+        assert r.get(f"joblock:{job_id}") is None
+    finally:
+        r.close()
+
