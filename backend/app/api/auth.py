@@ -29,10 +29,15 @@ def resolve_client_ip(request: Request) -> str:
     trust_count = settings.trust_proxy_count
     if trust_count <= 0:
         return peer
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    if not forwarded_for:
+    forwarded_values = request.headers.getlist("x-forwarded-for")
+    if not forwarded_values:
         return peer
-    hops = [part.strip() for part in forwarded_for.split(",") if part.strip()]
+    hops = [
+        part.strip()
+        for header_value in forwarded_values
+        for part in header_value.split(",")
+        if part.strip()
+    ]
     if len(hops) < trust_count:
         return peer
     return hops[-trust_count]

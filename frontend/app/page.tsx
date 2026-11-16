@@ -39,12 +39,7 @@ const specs = [
 ];
 
 export default async function HomePage() {
-  let session = null;
-  try {
-    session = await auth();
-  } catch {
-    session = null;
-  }
+  const session = await auth();
 
   return (
     <main className="mx-auto flex min-h-screen max-w-6xl flex-col px-5 pb-16 pt-6 sm:px-8">

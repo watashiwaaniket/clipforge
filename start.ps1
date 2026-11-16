@@ -34,15 +34,19 @@ function Set-BlankKey([string]$Key, [string]$Value) {
 
 $fernetBytes = New-Object byte[] 32
 $jwtBytes = New-Object byte[] 32
+$authBytes = New-Object byte[] 32
 [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($fernetBytes)
 [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($jwtBytes)
+[System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($authBytes)
 $fernet = [Convert]::ToBase64String($fernetBytes).Replace("+", "-").Replace("/", "_")
 $jwt = -join ($jwtBytes | ForEach-Object { $_.ToString("x2") })
+$authSecret = -join ($authBytes | ForEach-Object { $_.ToString("x2") })
 Set-BlankKey "ENCRYPTION_KEY" $fernet
 Set-BlankKey "JWT_SECRET" $jwt
+Set-BlankKey "AUTH_SECRET" $authSecret
 $utf8 = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllLines((Join-Path (Get-Location) ".env"), $lines, $utf8)
-Write-Host "Ensured ENCRYPTION_KEY and JWT_SECRET are set in .env (existing values kept)."
+Write-Host "Ensured ENCRYPTION_KEY, JWT_SECRET, and AUTH_SECRET are set in .env (existing values kept)."
 
 docker compose up --build -d --wait
 
@@ -62,6 +66,15 @@ for ($try = 1; $try -le 10; $try++) {
 if (-not $migrated) {
   Write-Error "alembic upgrade head failed"
   exit 1
+}
+
+foreach ($line in (Get-Content .env)) {
+  $trimmed = $line.Trim()
+  if ($trimmed -eq "" -or $trimmed.StartsWith("#")) { continue }
+  $parts = $trimmed.Split("=", 2)
+  if ($parts.Length -eq 2) {
+    [System.Environment]::SetEnvironmentVariable($parts[0].Trim(), $parts[1], "Process")
+  }
 }
 
 Set-Location frontend
