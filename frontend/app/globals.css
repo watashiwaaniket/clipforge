@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0e0f0c;
+  --bg-raise: #171910;
+  --ink: #f3f0e7;
+  --muted: #a39e92;
+  --acid: #dff25a;
+  --acid-ink: #1a1c0e;
+}
+
+body {
+  background:
+    radial-gradient(1000px 420px at 85% -10%, rgba(223, 242, 90, 0.09), transparent 55%),
+    var(--bg);
+  min-height: 100vh;
+}
+
+:focus-visible {
+  outline: 2px solid var(--acid);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-rise {
+    animation: none !important;
+  }
+}
