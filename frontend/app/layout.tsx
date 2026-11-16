@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { IBM_Plex_Mono, Instrument_Sans } from "next/font/google";
 
 import "./globals.css";
+import { Providers } from "./providers";
 
 const sans = Instrument_Sans({
   subsets: ["latin"],
@@ -25,7 +26,9 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className={`${sans.variable} ${mono.variable}`}>
-      <body className="bg-bg font-sans text-ink antialiased">{children}</body>
+      <body className="bg-bg font-sans text-ink antialiased">
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }

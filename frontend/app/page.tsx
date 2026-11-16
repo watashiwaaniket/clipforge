@@ -1,4 +1,9 @@
+import Link from "next/link";
+
+import { auth } from "../auth";
 import { HealthPill } from "./health-pill";
+
+export const dynamic = "force-dynamic";
 
 const steps = [
   {
@@ -33,7 +38,9 @@ const specs = [
   { value: "1080×1920", unit: "", label: "Center crop" },
 ];
 
-export default function HomePage() {
+export default async function HomePage() {
+  const session = await auth();
+
   return (
     <main className="mx-auto flex min-h-screen max-w-6xl flex-col px-5 pb-16 pt-6 sm:px-8">
       <header className="flex flex-wrap items-center justify-between gap-4">
@@ -42,6 +49,12 @@ export default function HomePage() {
         </a>
         <div className="flex flex-wrap items-center gap-3">
           <HealthPill />
+          <Link
+            href={session ? "/dashboard" : "/login"}
+            className="inline-flex h-10 items-center rounded-full bg-raise px-4 text-sm text-ink shadow-card transition-colors hover:text-acid"
+          >
+            {session ? "Dashboard" : "Sign in"}
+          </Link>
           <a
             href="#pipeline"
             className="inline-flex h-10 items-center rounded-full bg-acid px-4 text-sm font-medium text-[var(--acid-ink)] transition-transform active:scale-[0.96]"
@@ -157,7 +170,9 @@ export default function HomePage() {
       </section>
 
       <footer className="mt-10 flex flex-wrap items-center justify-between gap-3 font-mono text-xs text-muted">
-        <p>Dashboard and sign-in land with the job pipeline.</p>
+        <Link href="/dashboard" className="transition-colors hover:text-ink">
+          Dashboard
+        </Link>
         <p className="tabular-nums">localhost:3000 · API :8000</p>
       </footer>
     </main>

@@ -1,0 +1,11 @@
+{
+  "secret": "clipforge-jose-fixture-secret-32-chars-minimum",
+  "wrong_secret": "wrong-jose-fixture-secret-32-chars-minimum",
+  "sub": "00000000-0000-4000-8000-000000000001",
+  "iss": "clipforge",
+  "aud": "clipforge-api",
+  "iat": 1700000000,
+  "exp": 1700086400,
+  "token": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDEiLCJpc3MiOiJjbGlwZm9yZ2UiLCJhdWQiOiJjbGlwZm9yZ2UtYXBpIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjE3MDAwODY0MDB9.WtiVyCHR3SfK4sNn_SylNyBt2rn95F7r_jfEA3OzZF0",
+  "wrong_secret_token": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDEiLCJpc3MiOiJjbGlwZm9yZ2UiLCJhdWQiOiJjbGlwZm9yZ2UtYXBpIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjE3MDAwODY0MDB9.xX5sVVGx5dqVoagrHc4DTjJeqLBeYUdqGTC68jr-umY"
+}
