@@ -334,3 +334,78 @@ def test_auth_rate_limit_handles_multiple_xff_headers(
         assert redis_client.get("rl:auth:forged") is None
     finally:
         redis_client.close()
+
+
+def test_guest_auth_disabled_by_default(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "allow_guest_auth", False)
+
+    cfg = client.get("/api/v1/auth/config")
+    assert cfg.status_code == 200
+    assert cfg.json() == {"guest_enabled": False}
+
+    res = client.post("/api/v1/auth/guest")
+    assert res.status_code == 403
+    assert res.json()["detail"] == "Guest access is disabled."
+
+    with SessionLocal() as session:
+        assert session.query(User).filter(User.email == "local@clipforge.local").first() is None
+
+
+def test_guest_auth_enabled_is_idempotent_and_unusable_for_password_login(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "allow_guest_auth", True)
+
+    cfg = client.get("/api/v1/auth/config")
+    assert cfg.status_code == 200
+    assert cfg.json() == {"guest_enabled": True}
+
+    # Reserved local guest email cannot be claimed via /register even beforehand.
+    reg_reserved = client.post(
+        "/api/v1/auth/register",
+        json={"email": "LOCAL@clipforge.local", "password": "correct-horse-battery"},
+    )
+    assert reg_reserved.status_code == 400
+    assert reg_reserved.json()["detail"] == "Invalid email or password."
+
+    first = client.post("/api/v1/auth/guest")
+    assert first.status_code == 200
+    guest_body = first.json()
+    assert guest_body["email"] == "local@clipforge.local"
+    guest_id = UUID(guest_body["id"])
+
+    second = client.post("/api/v1/auth/guest")
+    assert second.status_code == 200
+    assert second.json() == guest_body
+
+    # Password login against the guest user always fails.
+    pw_login = client.post(
+        "/api/v1/auth/login",
+        json={"email": "local@clipforge.local", "password": "correct-horse-battery"},
+    )
+    assert pw_login.status_code == 400
+    assert pw_login.json()["detail"] == "Invalid email or password."
+
+    # A JWT issued for the guest user passes protected endpoints via get_current_user.
+    now = int(time.time())
+    token = _sign_hs256(
+        {"alg": "HS256"},
+        {
+            "sub": str(guest_id),
+            "iss": "clipforge",
+            "aud": "clipforge-api",
+            "iat": now,
+            "exp": now + 3600,
+        },
+        settings.jwt_secret,
+    )
+    assert decode_jwt_sub(token) == guest_id
+    me_keys = client.get("/api/v1/keys", headers={"Authorization": f"Bearer {token}"})
+    assert me_keys.status_code == 200
+    assert me_keys.json() == {"configured": False}
+    with SessionLocal() as session:
+        user = session.get(User, guest_id)
+        assert user is not None
+        assert user.password_hash == "!"

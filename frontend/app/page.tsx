@@ -1,7 +1,9 @@
 import Link from "next/link";
 
 import { auth } from "../auth";
+import { isGuestAuthEnabled } from "../lib/auth-mode";
 import { HealthPill } from "./health-pill";
+import { SkipSignInButton } from "./skip-signin-button";
 
 export const dynamic = "force-dynamic";
 
@@ -39,7 +41,7 @@ const specs = [
 ];
 
 export default async function HomePage() {
-  const session = await auth();
+  const [session, guestEnabled] = await Promise.all([auth(), isGuestAuthEnabled()]);
 
   return (
     <main className="mx-auto flex min-h-screen max-w-6xl flex-col px-5 pb-16 pt-6 sm:px-8">
@@ -49,6 +51,13 @@ export default async function HomePage() {
         </a>
         <div className="flex flex-wrap items-center gap-3">
           <HealthPill />
+          {!session && guestEnabled ? (
+            <SkipSignInButton
+              label="Skip sign-in"
+              pendingLabel="Opening..."
+              className="inline-flex h-10 items-center rounded-full bg-raise px-4 text-sm text-ink shadow-card transition-colors hover:text-acid disabled:cursor-not-allowed disabled:opacity-60"
+            />
+          ) : null}
           <Link
             href={session ? "/dashboard" : "/login"}
             className="inline-flex h-10 items-center rounded-full bg-raise px-4 text-sm text-ink shadow-card transition-colors hover:text-acid"

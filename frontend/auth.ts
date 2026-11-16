@@ -24,22 +24,53 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           return null;
         }
 
-        const response = await fetch(`${apiUrl}/api/v1/auth/login`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
-          cache: "no-store",
-        });
+        try {
+          const response = await fetch(`${apiUrl}/api/v1/auth/login`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password }),
+            cache: "no-store",
+            signal: AbortSignal.timeout(5000),
+          });
 
-        if (!response.ok) {
+          if (!response.ok) {
+            return null;
+          }
+
+          const data = (await response.json()) as { id?: string; email?: string };
+          if (!data.id || !data.email) {
+            return null;
+          }
+          return { id: data.id, email: data.email };
+        } catch {
           return null;
         }
+      },
+    }),
+    Credentials({
+      id: "guest",
+      name: "Local guest",
+      credentials: {},
+      async authorize() {
+        try {
+          const response = await fetch(`${apiUrl}/api/v1/auth/guest`, {
+            method: "POST",
+            cache: "no-store",
+            signal: AbortSignal.timeout(5000),
+          });
 
-        const data = (await response.json()) as { id?: string; email?: string };
-        if (!data.id || !data.email) {
+          if (!response.ok) {
+            return null;
+          }
+
+          const data = (await response.json()) as { id?: string; email?: string };
+          if (!data.id || !data.email) {
+            return null;
+          }
+          return { id: data.id, email: data.email };
+        } catch {
           return null;
         }
-        return { id: data.id, email: data.email };
       },
     }),
   ],
