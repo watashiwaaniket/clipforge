@@ -316,3 +316,21 @@ def test_auth_rate_limit_ignores_xff_when_untrusted_or_short(
         assert redis_client.get("rl:auth:testclient") == b"2"
     finally:
         redis_client.close()
+
+
+def test_auth_rate_limit_handles_multiple_xff_headers(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "trust_proxy_count", 1)
+    redis_client = redis.Redis.from_url(settings.redis_url)
+    try:
+        res = client.post(
+            "/api/v1/auth/login",
+            json={"email": "nobody@example.com", "password": "wrong-password-123"},
+            headers=[("X-Forwarded-For", "forged"), ("X-Forwarded-For", "real-last")],
+        )
+        assert res.status_code == 400
+        assert redis_client.get("rl:auth:real-last") == b"1"
+        assert redis_client.get("rl:auth:forged") is None
+    finally:
+        redis_client.close()

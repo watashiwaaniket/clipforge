@@ -1,28 +1,14 @@
 import { SignJWT } from "jose";
 import NextAuth from "next-auth";
-import type { DefaultSession } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
-import type { JWT } from "next-auth/jwt";
 
-declare module "next-auth" {
-  interface Session {
-    accessToken?: string;
-    user: DefaultSession["user"];
-  }
-}
-
-declare module "next-auth/jwt" {
-  interface JWT {
-    accessToken?: string;
-  }
-}
+import { authConfig, isTokenExpired, SESSION_MAX_AGE_S } from "./auth.config";
 
 const apiUrl =
   process.env.API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  session: { strategy: "jwt" },
-  pages: { signIn: "/login" },
+  ...authConfig,
   providers: [
     Credentials({
       credentials: {
@@ -58,28 +44,30 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     }),
   ],
   callbacks: {
+    ...authConfig.callbacks,
     async jwt({ token, user }) {
       if (user) {
         const secret = process.env.JWT_SECRET;
         if (!secret) {
           throw new Error("JWT_SECRET is not configured.");
         }
+        const now = Math.floor(Date.now() / 1000);
         token.sub = user.id;
+        token.accessTokenExpiresAt = now + SESSION_MAX_AGE_S;
         token.accessToken = await new SignJWT({ sub: user.id })
           .setProtectedHeader({ alg: "HS256" })
           .setIssuer("clipforge")
           .setAudience("clipforge-api")
-          .setIssuedAt()
-          .setExpirationTime("24h")
+          .setIssuedAt(now)
+          .setExpirationTime(now + SESSION_MAX_AGE_S)
           .sign(new TextEncoder().encode(secret));
+        return token;
+      }
+
+      if (isTokenExpired(token)) {
+        return null;
       }
       return token;
-    },
-    async session({ session, token }) {
-      if (typeof token.accessToken === "string") {
-        session.accessToken = token.accessToken;
-      }
-      return session;
     },
   },
 });

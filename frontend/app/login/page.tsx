@@ -6,7 +6,7 @@ import { signIn } from "next-auth/react";
 import { FormEvent, Suspense, useState } from "react";
 
 function safeCallbackUrl(raw: string | null): string {
-  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//") || raw.startsWith("/\\")) {
     return "/dashboard";
   }
   return raw;

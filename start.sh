@@ -36,8 +36,9 @@ def fill(key: str, value: str) -> None:
 fernet = base64.urlsafe_b64encode(os.urandom(32)).decode()
 fill("ENCRYPTION_KEY", fernet)
 fill("JWT_SECRET", secrets.token_hex(32))
+fill("AUTH_SECRET", secrets.token_hex(32))
 path.write_text("\n".join(lines) + "\n")
-print("Ensured ENCRYPTION_KEY and JWT_SECRET are set in .env (existing values kept).")
+print("Ensured ENCRYPTION_KEY, JWT_SECRET, and AUTH_SECRET are set in .env (existing values kept).")
 PY
 
 docker compose up --build -d --wait
@@ -54,6 +55,11 @@ if [[ "$ok" -ne 1 ]]; then
   echo "alembic upgrade head failed" >&2
   exit 1
 fi
+
+set -a
+# shellcheck disable=SC1091
+source .env
+set +a
 
 cd frontend
 if [[ ! -d node_modules ]]; then
