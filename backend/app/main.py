@@ -1,5 +1,3 @@
-import logging
-import sys
 from contextlib import asynccontextmanager
 
 import structlog
@@ -7,22 +5,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-
-
-def configure_logging() -> None:
-    logging.basicConfig(format="%(message)s", level=logging.INFO, stream=sys.stdout)
-    structlog.configure(
-        processors=[
-            structlog.stdlib.filter_by_level,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.JSONRenderer(),
-        ],
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        wrapper_class=structlog.stdlib.BoundLogger,
-        cache_logger_on_first_use=True,
-    )
-
+from app.logging import configure_logging
+from app.security import validate_runtime_secrets
 
 configure_logging()
 log = structlog.get_logger()
@@ -30,6 +14,7 @@ log = structlog.get_logger()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    validate_runtime_secrets()
     log.info("api_start")
     yield
 

@@ -44,7 +44,25 @@ $utf8 = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllLines((Join-Path (Get-Location) ".env"), $lines, $utf8)
 Write-Host "Ensured ENCRYPTION_KEY and JWT_SECRET are set in .env (existing values kept)."
 
-docker compose up --build -d
+docker compose up --build -d --wait
+
+$migrated = $false
+for ($try = 1; $try -le 10; $try++) {
+  $prevPref = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  docker compose exec -T api alembic upgrade head
+  $exitCode = $LASTEXITCODE
+  $ErrorActionPreference = $prevPref
+  if ($exitCode -eq 0) {
+    $migrated = $true
+    break
+  }
+  Start-Sleep -Seconds 3
+}
+if (-not $migrated) {
+  Write-Error "alembic upgrade head failed"
+  exit 1
+}
 
 Set-Location frontend
 if (-not (Test-Path node_modules)) {
