@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     storage_dir: str = "/storage"
     max_vod_minutes: int = 240
     max_clips_per_job: int = 8
+    max_concurrent_jobs: int = 3
+    max_jobs_per_day: int = 10
+    job_timeout_seconds: int = 2700
+    whisper_language: str = "en"
+    trust_proxy_count: int = 0
+    min_free_disk_bytes: int = 8 * 1024 * 1024 * 1024
     openai_api_key: str = ""
     cors_origins: str = "http://localhost:3000"
 

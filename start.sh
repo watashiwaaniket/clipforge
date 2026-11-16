@@ -40,7 +40,20 @@ path.write_text("\n".join(lines) + "\n")
 print("Ensured ENCRYPTION_KEY and JWT_SECRET are set in .env (existing values kept).")
 PY
 
-docker compose up --build -d
+docker compose up --build -d --wait
+
+ok=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if docker compose exec -T api alembic upgrade head; then
+    ok=1
+    break
+  fi
+  sleep 3
+done
+if [[ "$ok" -ne 1 ]]; then
+  echo "alembic upgrade head failed" >&2
+  exit 1
+fi
 
 cd frontend
 if [[ ! -d node_modules ]]; then
