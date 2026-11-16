@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import router as auth_router
+from app.api.keys import router as keys_router
 from app.config import settings
 from app.logging import configure_logging
 from app.security import validate_runtime_secrets
@@ -30,6 +31,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(keys_router)
 
 
 @app.get("/api/v1/health")
