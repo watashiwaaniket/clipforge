@@ -402,6 +402,9 @@ def test_guest_auth_enabled_is_idempotent_and_unusable_for_password_login(
         settings.jwt_secret,
     )
     assert decode_jwt_sub(token) == guest_id
+    me_keys = client.get("/api/v1/keys", headers={"Authorization": f"Bearer {token}"})
+    assert me_keys.status_code == 200
+    assert me_keys.json() == {"configured": False}
     with SessionLocal() as session:
         user = session.get(User, guest_id)
         assert user is not None

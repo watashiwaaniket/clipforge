@@ -14,6 +14,8 @@ export function RegisterForm({ guestEnabled }: { guestEnabled: boolean }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [guestSubmitting, setGuestSubmitting] = useState(false);
+  const busy = submitting || guestSubmitting;
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -122,7 +124,7 @@ export function RegisterForm({ guestEnabled }: { guestEnabled: boolean }) {
 
         <button
           type="submit"
-          disabled={submitting}
+          disabled={busy}
           className="inline-flex h-11 w-full items-center justify-center rounded-full bg-acid px-5 text-sm font-medium text-[var(--acid-ink)] transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60"
         >
           {submitting ? "Creating account..." : "Create account"}
@@ -131,7 +133,12 @@ export function RegisterForm({ guestEnabled }: { guestEnabled: boolean }) {
 
       {guestEnabled ? (
         <div className="mt-5 border-t border-white/10 pt-5">
-          <SkipSignInButton onError={(msg) => setError(msg)} />
+          <SkipSignInButton
+            disabled={submitting}
+            onStart={() => setError(null)}
+            onPendingChange={setGuestSubmitting}
+            onError={(msg) => setError(msg)}
+          />
         </div>
       ) : null}
     </div>

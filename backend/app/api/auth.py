@@ -176,6 +176,13 @@ def login(
             detail="Invalid email or password.",
         )
 
+    if user.password_hash == _UNUSABLE_PASSWORD_HASH:
+        verify_dummy_password(body.password)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid email or password.",
+        )
+
     if not verify_password(body.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

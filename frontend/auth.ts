@@ -24,22 +24,27 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           return null;
         }
 
-        const response = await fetch(`${apiUrl}/api/v1/auth/login`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
-          cache: "no-store",
-        });
+        try {
+          const response = await fetch(`${apiUrl}/api/v1/auth/login`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password }),
+            cache: "no-store",
+            signal: AbortSignal.timeout(5000),
+          });
 
-        if (!response.ok) {
+          if (!response.ok) {
+            return null;
+          }
+
+          const data = (await response.json()) as { id?: string; email?: string };
+          if (!data.id || !data.email) {
+            return null;
+          }
+          return { id: data.id, email: data.email };
+        } catch {
           return null;
         }
-
-        const data = (await response.json()) as { id?: string; email?: string };
-        if (!data.id || !data.email) {
-          return null;
-        }
-        return { id: data.id, email: data.email };
       },
     }),
     Credentials({
@@ -47,20 +52,25 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       name: "Local guest",
       credentials: {},
       async authorize() {
-        const response = await fetch(`${apiUrl}/api/v1/auth/guest`, {
-          method: "POST",
-          cache: "no-store",
-        });
+        try {
+          const response = await fetch(`${apiUrl}/api/v1/auth/guest`, {
+            method: "POST",
+            cache: "no-store",
+            signal: AbortSignal.timeout(5000),
+          });
 
-        if (!response.ok) {
+          if (!response.ok) {
+            return null;
+          }
+
+          const data = (await response.json()) as { id?: string; email?: string };
+          if (!data.id || !data.email) {
+            return null;
+          }
+          return { id: data.id, email: data.email };
+        } catch {
           return null;
         }
-
-        const data = (await response.json()) as { id?: string; email?: string };
-        if (!data.id || !data.email) {
-          return null;
-        }
-        return { id: data.id, email: data.email };
       },
     }),
   ],
