@@ -2,18 +2,32 @@ import json
 import subprocess
 from collections.abc import Generator
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import redis
+from celery.exceptions import SoftTimeLimitExceeded
 
+import app.workers.pipeline as pipeline_module
 from app.config import settings
 from app.db import SessionLocal
-from app.errors import InvalidTransition
-from app.models import Job, User
-from app.security import hash_password
+from app.errors import InvalidStoredKey, InvalidTransition, TranscriptionFailed
+from app.logging import configure_logging
+from app.models import ApiKey, Job, User
+from app.security import encrypt_api_key, hash_password
+from app.services.downloader import DownloadResult
 from app.services.jobs import transition_job
-from app.workers.pipeline import begin_attempt, process_job
+from app.services.transcribe import Word
+from app.workers.celery_app import celery_app
+from app.workers.pipeline import _select_whisper_key, begin_attempt, process_job
+
+
+def _sk_canary() -> str:
+    return "sk-canary-" + "DO-NOT-LEAK-" + "0123456789abcdef"
+
+
+def _gsk_canary() -> str:
+    return "gsk_" + "canary-" + "DO-NOT-LEAK-" + "abcdef0123456789"
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +41,13 @@ def flush_test_redis() -> Generator[None, None, None]:
         client.close()
 
 
-def _seed_queued_job() -> str:
+def _seed_queued_job(
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key_plaintext: str | None = None,
+    raw_encrypted_key: bytes | None = None,
+) -> tuple[UUID, str]:
     with SessionLocal() as session:
         user = User(
             email=f"pipe-{uuid4().hex[:8]}@example.com",
@@ -35,6 +55,21 @@ def _seed_queued_job() -> str:
         )
         session.add(user)
         session.flush()
+        if provider is not None:
+            encrypted = (
+                raw_encrypted_key
+                if raw_encrypted_key is not None
+                else encrypt_api_key(api_key_plaintext or "sk-default-key")
+            )
+            session.add(
+                ApiKey(
+                    user_id=user.id,
+                    provider=provider,
+                    encrypted_key=encrypted,
+                    base_url=base_url or "https://api.openai.com/v1",
+                    model="gpt-4o-mini",
+                )
+            )
         job = Job(
             user_id=user.id,
             source_url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
@@ -44,16 +79,27 @@ def _seed_queued_job() -> str:
         )
         session.add(job)
         session.commit()
-        return str(job.id)
+        return user.id, str(job.id)
 
 
-def test_process_job_stops_after_download(
+def test_celery_time_limits_are_configured() -> None:
+    assert celery_app.conf.task_soft_time_limit == 2700
+    assert celery_app.conf.task_time_limit == 2760
+    assert "openai" not in pipeline_module.__dict__
+
+
+def test_process_job_stops_after_transcribe(
     clean_db: None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
-    job_id = _seed_queued_job()
+    monkeypatch.setattr(settings, "openai_api_key", "")
+    _user_id, job_id = _seed_queued_job(
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        api_key_plaintext="sk-user-openai-key",
+    )
 
     def fake_run(argv, **kwargs):
         if "--dump-single-json" in argv:
@@ -85,16 +131,52 @@ def test_process_job_stops_after_download(
 
     monkeypatch.setattr("app.services.downloader.subprocess.run", fake_run)
 
+    observed_statuses: list[str] = []
+    original_transition = pipeline_module.transition_job
+
+    def spy_transition(session, job, new_status, message):
+        observed_statuses.append(new_status)
+        return original_transition(session, job, new_status, message)
+
+    monkeypatch.setattr("app.workers.pipeline.transition_job", spy_transition)
+
+    class FakeTranscriber:
+        def __init__(self, on_chunk) -> None:
+            self._on_chunk = on_chunk
+            self.last_chunk_count = 1
+
+        def transcribe(self, audio_path: Path) -> list[Word]:
+            assert audio_path == tmp_path / "jobs" / job_id / "vod.mp4"
+            if self._on_chunk is not None:
+                self._on_chunk(1, 1)
+            return [Word(word="hello", start=1.2, end=1.6)]
+
+    monkeypatch.setattr(
+        "app.workers.pipeline.build_transcriber",
+        lambda _key, *, language, on_chunk=None: FakeTranscriber(on_chunk),
+    )
+
     process_job(job_id)
 
     expected_mp4 = tmp_path / "jobs" / job_id / "vod.mp4"
+    expected_transcript = tmp_path / "jobs" / job_id / "transcript.json"
+    expected_wav = tmp_path / "jobs" / job_id / "audio.wav"
     assert expected_mp4.exists()
+    assert expected_transcript.exists()
+    assert not expected_wav.exists()
+    assert json.loads(expected_transcript.read_text(encoding="utf-8")) == [
+        {"word": "hello", "start": 1.2, "end": 1.6}
+    ]
+    assert observed_statuses == ["downloading", "transcribing"]
 
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
         assert job.status == "failed"
-        assert job.error == "Download finished. Later stages are not included in this build yet."
+        assert (
+            job.error == "Transcription finished. Later stages are not included in this build yet."
+        )
+        assert job.progress_message == "Transcribing speech (1/1)"
         assert job.title == "Pipeline Test VOD"
         assert job.duration_s == 180.0
         assert job.thumbnail_url == "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"
@@ -109,11 +191,136 @@ def test_process_job_stops_after_download(
         r.close()
 
 
+def test_select_whisper_key_precedence(clean_db: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1. User OpenAI key beats operator fallback even when both are set.
+    user_key = "sk-user-primary-123456"
+    uid_openai, _ = _seed_queued_job(
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        api_key_plaintext=user_key,
+    )
+    monkeypatch.setattr(settings, "openai_api_key", "sk-operator-fallback-9999")
+    assert _select_whisper_key(uid_openai) == user_key
+
+    # 2. Non-OpenAI user key uses operator fallback when configured.
+    uid_groq, job_groq_id = _seed_queued_job(
+        provider="groq",
+        base_url="https://api.groq.com/openai/v1",
+        api_key_plaintext="gsk_user_groq_key",
+    )
+    assert _select_whisper_key(uid_groq) == "sk-operator-fallback-9999"
+
+    # 3. Groq user key with empty operator key fails before constructing client.
+    monkeypatch.setattr(settings, "openai_api_key", "")
+    factory_called = False
+
+    def fail_if_called(*_args, **_kwargs):
+        nonlocal factory_called
+        factory_called = True
+        raise AssertionError("Transcriber should not be constructed")
+
+    monkeypatch.setattr("app.workers.pipeline.build_transcriber", fail_if_called)
+    monkeypatch.setattr(
+        "app.workers.pipeline.probe_and_download",
+        lambda _url, job_dir, **_kw: (
+            (job_dir / "vod.mp4").write_bytes(b"mp4"),
+            DownloadResult(
+                path=job_dir / "vod.mp4",
+                platform="youtube",
+                title="Groq key fail",
+                duration_s=60.0,
+                thumbnail_url=None,
+            ),
+        )[-1],
+    )
+    process_job(job_groq_id)
+    assert factory_called is False
+    with SessionLocal() as session:
+        job = session.get(Job, job_groq_id)
+        assert job is not None
+        assert job.status == "failed"
+        assert job.error == (
+            "Transcription needs an OpenAI Whisper key on the server, or an OpenAI key saved in "
+            "your account. Other providers can score clips but cannot transcribe in this build."
+        )
+
+    # 4. Corrupt OpenAI ciphertext raises InvalidStoredKey instead of falling back.
+    monkeypatch.setattr(settings, "openai_api_key", "sk-operator-fallback-9999")
+    uid_bad, _ = _seed_queued_job(
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        raw_encrypted_key=b"not-a-valid-fernet-token",
+    )
+    with pytest.raises(InvalidStoredKey):
+        _select_whisper_key(uid_bad)
+
+
+@pytest.mark.parametrize("canary_fn", [_sk_canary, _gsk_canary])
+def test_process_job_redacts_whisper_canary_from_logs_and_error(
+    clean_db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    canary_fn,
+) -> None:
+    import logging
+
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
+    canary = canary_fn()
+    monkeypatch.setattr(settings, "openai_api_key", canary)
+    _uid, job_id = _seed_queued_job(
+        provider="groq",
+        base_url="https://api.groq.com/openai/v1",
+        api_key_plaintext="gsk_other_key_1234",
+    )
+
+    monkeypatch.setattr(
+        "app.workers.pipeline.probe_and_download",
+        lambda _url, job_dir, **_kw: (
+            (job_dir / "vod.mp4").write_bytes(b"mp4"),
+            DownloadResult(
+                path=job_dir / "vod.mp4",
+                platform="youtube",
+                title="Canary VOD",
+                duration_s=60.0,
+                thumbnail_url=None,
+            ),
+        )[-1],
+    )
+
+    received_keys: list[str] = []
+
+    class ExplodingTranscriber:
+        def transcribe(self, _audio_path: Path) -> list[Word]:
+            raise TranscriptionFailed(f"failed calling whisper with {canary}")
+
+    def spy_build(api_key: str, *, language: str, on_chunk=None):
+        received_keys.append(api_key)
+        return ExplodingTranscriber()
+
+    monkeypatch.setattr("app.workers.pipeline.build_transcriber", spy_build)
+
+    configure_logging()
+    with caplog.at_level(logging.INFO):
+        process_job(job_id)
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert received_keys == [canary]
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.status == "failed"
+        assert job.error is not None
+        assert canary not in job.error
+        assert "[REDACTED]" in job.error
+    assert canary not in joined
+
+
 def test_begin_attempt_lock_eviction_requeue_and_attempt_cap(
     clean_db: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    job_id = _seed_queued_job()
+    _uid, job_id = _seed_queued_job()
     r = redis.Redis.from_url(settings.redis_url)
     try:
         # Active remote/other-host lock defers without incrementing attempt
@@ -165,7 +372,7 @@ def test_begin_attempt_lock_eviction_requeue_and_attempt_cap(
 
 
 def test_transition_job_enforces_forward_only(clean_db: None) -> None:
-    job_id = _seed_queued_job()
+    _uid, job_id = _seed_queued_job()
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
@@ -182,76 +389,76 @@ def test_transition_job_enforces_forward_only(clean_db: None) -> None:
             transition_job(session, job, "queued", "backwards")
 
 
-def test_run_pipeline_resumes_valid_vod_and_redownloads_corrupt_vod(
+def test_run_pipeline_resumes_valid_vod_and_transcript(
     clean_db: None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
-    job_id = _seed_queued_job()
+    _uid, job_id = _seed_queued_job(
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        api_key_plaintext="sk-resume-key",
+    )
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
-        job.status = "downloading"
+        job.status = "transcribing"
         job.duration_s = 120.0
         session.commit()
 
     vod_file = tmp_path / "jobs" / job_id / "vod.mp4"
     vod_file.parent.mkdir(parents=True, exist_ok=True)
     vod_file.write_bytes(b"valid-vod")
+    transcript_file = tmp_path / "jobs" / job_id / "transcript.json"
+    transcript_file.write_text(
+        json.dumps([{"word": "resumed", "start": 0.5, "end": 0.9}]),
+        encoding="utf-8",
+    )
 
-    # 1. Matching ffprobe duration skips probe_and_download
     monkeypatch.setattr("app.workers.pipeline.probe_media_duration", lambda _p: 121.5)
     monkeypatch.setattr(
         "app.workers.pipeline.probe_and_download",
         lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not download")),
     )
+    monkeypatch.setattr(
+        "app.workers.pipeline.build_transcriber",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not transcribe")),
+    )
     process_job(job_id)
+
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
         assert job.status == "failed"
-        assert job.error == "Download finished. Later stages are not included in this build yet."
+        assert (
+            job.error == "Transcription finished. Later stages are not included in this build yet."
+        )
 
-    # 2. Reset to downloading with unreadable vod.mp4 -> triggers download
+
+def test_process_job_soft_time_limit_marks_timeout(
+    clean_db: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _uid, job_id = _seed_queued_job()
+    monkeypatch.setattr(
+        "app.workers.pipeline.run_pipeline",
+        lambda *_a, **_kw: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
+    )
+    process_job(job_id)
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
-        job.status = "downloading"
-        job.error = None
-        job.finished_at = None
-        job.attempt = 0
-        session.commit()
-
-    vod_file.write_bytes(b"corrupt")
-    monkeypatch.setattr("app.workers.pipeline.probe_media_duration", lambda _p: None)
-    downloaded_urls: list[str] = []
-
-    def fake_probe_and_download(url: str, job_dir: Path, **_kwargs):
-        from app.services.downloader import DownloadResult
-
-        downloaded_urls.append(url)
-        out = job_dir / "vod.mp4"
-        out.write_bytes(b"re-downloaded")
-        return DownloadResult(
-            path=out,
-            platform="youtube",
-            title="Resumed VOD",
-            duration_s=120.0,
-            thumbnail_url=None,
-        )
-
-    monkeypatch.setattr("app.workers.pipeline.probe_and_download", fake_probe_and_download)
-    process_job(job_id)
-    assert len(downloaded_urls) == 1
-    assert vod_file.read_bytes() == b"re-downloaded"
+        assert job.attempt == 1
+        assert job.status == "failed"
+        assert job.error == "This job exceeded the 45 minute limit and was stopped."
 
 
 def test_process_job_at_attempt_cap_fails_without_downloading_and_releases_lock(
     clean_db: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    job_id = _seed_queued_job()
+    _uid, job_id = _seed_queued_job()
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
@@ -282,7 +489,7 @@ def test_begin_attempt_releases_lock_on_unexpected_exception(
     clean_db: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    job_id = _seed_queued_job()
+    _uid, job_id = _seed_queued_job()
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
@@ -302,4 +509,3 @@ def test_begin_attempt_releases_lock_on_unexpected_exception(
         assert r.get(f"joblock:{job_id}") is None
     finally:
         r.close()
-

@@ -51,6 +51,15 @@ def secret_scope(secret: str) -> Iterator[None]:
             _secrets_var.reset(token)
 
 
+@contextmanager
+def secret_boundary() -> Iterator[None]:
+    token = _secrets_var.set(_secrets_var.get())
+    try:
+        yield
+    finally:
+        _secrets_var.reset(token)
+
+
 def redact(text: str) -> str:
     result = text
     secrets = sorted(_secrets_var.get(), key=len, reverse=True)
