@@ -17,6 +17,7 @@ from app.models import ApiKey, Job, User
 from app.security import encrypt_api_key, hash_password
 from app.services.downloader import DownloadResult
 from app.services.jobs import transition_job
+from app.services.scorer import ScoredWindow, load_windows
 from app.services.transcribe import Word
 from app.workers.celery_app import celery_app
 from app.workers.pipeline import _select_whisper_key, begin_attempt, process_job
@@ -88,7 +89,7 @@ def test_celery_time_limits_are_configured() -> None:
     assert "openai" not in pipeline_module.__dict__
 
 
-def test_process_job_stops_after_transcribe(
+def test_process_job_stops_after_score(
     clean_db: None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -156,27 +157,72 @@ def test_process_job_stops_after_transcribe(
         lambda _key, *, language, on_chunk=None: FakeTranscriber(on_chunk),
     )
 
+    def fake_run_scoring(
+        words: list[Word],
+        *,
+        duration_s: float,
+        api_key: str,
+        base_url: str,
+        model: str,
+        provider: str,
+        max_clips: int,
+        job_id: str,
+        on_chunk=None,
+    ) -> list[ScoredWindow]:
+        assert api_key == "sk-user-openai-key"
+        assert base_url == "https://api.openai.com/v1"
+        assert model == "gpt-4o-mini"
+        assert provider == "openai"
+        assert duration_s == 180.0
+        assert max_clips == settings.max_clips_per_job
+        if on_chunk is not None:
+            on_chunk(1, 1)
+        return [
+            ScoredWindow(
+                start_s=0.0,
+                end_s=9.6,
+                score=91,
+                title="Heist chaos",
+                hook="Immediate action.",
+                score_source="llm",
+                word_start=0,
+                word_end=0,
+            )
+        ]
+
+    monkeypatch.setattr("app.workers.pipeline.run_scoring", fake_run_scoring)
+
     process_job(job_id)
 
     expected_mp4 = tmp_path / "jobs" / job_id / "vod.mp4"
     expected_transcript = tmp_path / "jobs" / job_id / "transcript.json"
+    expected_windows = tmp_path / "jobs" / job_id / "windows.json"
     expected_wav = tmp_path / "jobs" / job_id / "audio.wav"
     assert expected_mp4.exists()
     assert expected_transcript.exists()
+    assert expected_windows.exists()
     assert not expected_wav.exists()
-    assert json.loads(expected_transcript.read_text(encoding="utf-8")) == [
-        {"word": "hello", "start": 1.2, "end": 1.6}
+    loaded_windows = load_windows(expected_windows)
+    assert loaded_windows == [
+        ScoredWindow(
+            start_s=0.0,
+            end_s=9.6,
+            score=91,
+            title="Heist chaos",
+            hook="Immediate action.",
+            score_source="llm",
+            word_start=0,
+            word_end=0,
+        )
     ]
-    assert observed_statuses == ["downloading", "transcribing"]
+    assert observed_statuses == ["downloading", "transcribing", "scoring"]
 
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
         assert job.status == "failed"
-        assert (
-            job.error == "Transcription finished. Later stages are not included in this build yet."
-        )
-        assert job.progress_message == "Transcribing speech (1/1)"
+        assert job.error == "Scoring finished. Later stages are not included in this build yet."
+        assert job.progress_message == "Scoring highlights (1/1)"
         assert job.title == "Pipeline Test VOD"
         assert job.duration_s == 180.0
         assert job.thumbnail_url == "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"
@@ -389,7 +435,7 @@ def test_transition_job_enforces_forward_only(clean_db: None) -> None:
             transition_job(session, job, "queued", "backwards")
 
 
-def test_run_pipeline_resumes_valid_vod_and_transcript(
+def test_run_pipeline_resumes_valid_vod_transcript_and_windows(
     clean_db: None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -403,7 +449,7 @@ def test_run_pipeline_resumes_valid_vod_and_transcript(
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
-        job.status = "transcribing"
+        job.status = "scoring"
         job.duration_s = 120.0
         session.commit()
 
@@ -415,6 +461,8 @@ def test_run_pipeline_resumes_valid_vod_and_transcript(
         json.dumps([{"word": "resumed", "start": 0.5, "end": 0.9}]),
         encoding="utf-8",
     )
+    windows_file = tmp_path / "jobs" / job_id / "windows.json"
+    windows_file.write_text("[]", encoding="utf-8")
 
     monkeypatch.setattr("app.workers.pipeline.probe_media_duration", lambda _p: 121.5)
     monkeypatch.setattr(
@@ -425,15 +473,147 @@ def test_run_pipeline_resumes_valid_vod_and_transcript(
         "app.workers.pipeline.build_transcriber",
         lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not transcribe")),
     )
+    monkeypatch.setattr(
+        "app.workers.pipeline.run_scoring",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not score")),
+    )
     process_job(job_id)
 
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
         assert job.status == "failed"
-        assert (
-            job.error == "Transcription finished. Later stages are not included in this build yet."
-        )
+        assert job.error == "Scoring finished. Later stages are not included in this build yet."
+
+
+def test_scoring_missing_api_key_row_fails_without_operator_fallback(
+    clean_db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "openai_api_key", "sk-operator-should-not-score")
+    _uid, job_id = _seed_queued_job()
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.duration_s = 60.0
+        session.commit()
+
+    vod_file = tmp_path / "jobs" / job_id / "vod.mp4"
+    vod_file.parent.mkdir(parents=True, exist_ok=True)
+    vod_file.write_bytes(b"valid-vod")
+    transcript_file = tmp_path / "jobs" / job_id / "transcript.json"
+    transcript_file.write_text(
+        json.dumps([{"word": "resumed", "start": 0.5, "end": 0.9}]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.workers.pipeline.probe_media_duration", lambda _p: 60.0)
+    monkeypatch.setattr(
+        "app.workers.pipeline.run_scoring",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("should not score")),
+    )
+
+    process_job(job_id)
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.status == "failed"
+        assert job.error == "Add an API key before generating clips."
+
+
+def test_scoring_corrupt_api_key_fails_job(
+    clean_db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
+    _uid, job_id = _seed_queued_job(
+        provider="groq",
+        base_url="https://api.groq.com/openai/v1",
+        raw_encrypted_key=b"corrupt-ciphertext",
+    )
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.duration_s = 60.0
+        session.commit()
+
+    vod_file = tmp_path / "jobs" / job_id / "vod.mp4"
+    vod_file.parent.mkdir(parents=True, exist_ok=True)
+    vod_file.write_bytes(b"valid-vod")
+    transcript_file = tmp_path / "jobs" / job_id / "transcript.json"
+    transcript_file.write_text(
+        json.dumps([{"word": "resumed", "start": 0.5, "end": 0.9}]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.workers.pipeline.probe_media_duration", lambda _p: 60.0)
+
+    process_job(job_id)
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.status == "failed"
+        assert job.error == "The saved API key could not be decrypted. Enter it again."
+
+
+@pytest.mark.parametrize("canary_fn", [_sk_canary, _gsk_canary])
+def test_process_job_redacts_scoring_canary_from_logs_and_error(
+    clean_db: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    canary_fn,
+) -> None:
+    import logging
+
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
+    canary = canary_fn()
+    _uid, job_id = _seed_queued_job(
+        provider="groq",
+        base_url="https://api.groq.com/openai/v1",
+        api_key_plaintext=canary,
+    )
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.duration_s = 60.0
+        session.commit()
+
+    vod_file = tmp_path / "jobs" / job_id / "vod.mp4"
+    vod_file.parent.mkdir(parents=True, exist_ok=True)
+    vod_file.write_bytes(b"valid-vod")
+    transcript_file = tmp_path / "jobs" / job_id / "transcript.json"
+    transcript_file.write_text(
+        json.dumps([{"word": "resumed", "start": 0.5, "end": 0.9}]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.workers.pipeline.probe_media_duration", lambda _p: 60.0)
+
+    received_keys: list[str] = []
+
+    def exploding_scoring(*_args, api_key: str, **_kwargs):
+        received_keys.append(api_key)
+        raise pipeline_module.ClipForgeError("internal", f"scoring crashed with {canary}")
+
+    monkeypatch.setattr("app.workers.pipeline.run_scoring", exploding_scoring)
+
+    configure_logging()
+    with caplog.at_level(logging.INFO):
+        process_job(job_id)
+
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert received_keys == [canary]
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.status == "failed"
+        assert job.error is not None
+        assert canary not in job.error
+        assert "[REDACTED]" in job.error
+    assert canary not in joined
 
 
 def test_process_job_soft_time_limit_marks_timeout(
@@ -441,11 +621,19 @@ def test_process_job_soft_time_limit_marks_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _uid, job_id = _seed_queued_job()
+    cancelled = False
+
+    def spy_cancel() -> None:
+        nonlocal cancelled
+        cancelled = True
+
+    monkeypatch.setattr("app.workers.pipeline.cancel_score_pool", spy_cancel)
     monkeypatch.setattr(
         "app.workers.pipeline.run_pipeline",
         lambda *_a, **_kw: (_ for _ in ()).throw(SoftTimeLimitExceeded()),
     )
     process_job(job_id)
+    assert cancelled is True
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None

@@ -20,10 +20,24 @@ from app.models import ApiKey, Job
 from app.security import decrypt_api_key
 from app.services.downloader import probe_and_download, probe_media_duration
 from app.services.jobs import ORDER, fail_job, is_terminal, set_progress, transition_job
-from app.services.storage import cleanup_raw, ensure_job_dirs, transcript_path, vod_path
+from app.services.scorer import (
+    ScoredWindow,
+    cancel_score_pool,
+    load_windows,
+    save_windows,
+    score_transcript,
+)
+from app.services.storage import (
+    cleanup_raw,
+    ensure_job_dirs,
+    transcript_path,
+    vod_path,
+    windows_path,
+)
 from app.services.transcribe import (
     Transcriber,
     WhisperApiTranscriber,
+    Word,
     load_transcript,
     save_transcript,
 )
@@ -31,8 +45,8 @@ from app.workers.celery_app import celery_app
 
 log = structlog.get_logger()
 
-# PHASE 2 ONLY. Deleted in phase 3 when scoring is real.
-STUB_AFTER_TRANSCRIBE = True
+# PHASE 3 ONLY. Deleted in phase 4 when clipping is real.
+STUB_AFTER_SCORE = True
 
 JOB_LOCK_TTL_S = 60
 JOB_LOCK_REFRESH_INTERVAL_S = 20.0
@@ -286,6 +300,31 @@ def build_transcriber(
     return WhisperApiTranscriber(api_key, language=language, on_chunk=on_chunk)
 
 
+def run_scoring(
+    words: list[Word],
+    *,
+    duration_s: float,
+    api_key: str,
+    base_url: str,
+    model: str,
+    provider: str,
+    max_clips: int,
+    job_id: str,
+    on_chunk: Callable[[int, int], None] | None = None,
+) -> list[ScoredWindow]:
+    return score_transcript(
+        words,
+        duration_s=duration_s,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        provider=provider,
+        max_clips=max_clips,
+        job_id=job_id,
+        on_chunk=on_chunk,
+    )
+
+
 def run_pipeline(job_id: str, lock_token: str) -> None:
     uid = UUID(str(job_id))
     with session_scope() as session:
@@ -325,6 +364,7 @@ def run_pipeline(job_id: str, lock_token: str) -> None:
                 thumbnail_url=thumbnail_url,
             ),
         )
+        stored_duration_s = result.duration_s
         _persist_download_metadata(
             uid,
             title=result.title,
@@ -375,10 +415,69 @@ def run_pipeline(job_id: str, lock_token: str) -> None:
             chunks=chunk_count,
         )
 
-    if STUB_AFTER_TRANSCRIBE:
+    w_path = windows_path(uid)
+    windows = load_windows(w_path)
+    if windows is None:
+        with session_scope() as session:
+            job = session.get(Job, uid)
+            if job is None or job.status in {"completed", "failed"}:
+                return
+            if ORDER.index("scoring") > ORDER.index(job.status):
+                prev_status = job.status
+                transition_job(session, job, "scoring", "Scoring transcript for highlights")
+                log.info(
+                    "job_transition",
+                    job_id=str(uid),
+                    **{"from": prev_status, "to": "scoring"},
+                )
+
+        refresh_job_lock(uid, lock_token)
+
+        with session_scope() as session:
+            key_row = session.scalar(select(ApiKey).where(ApiKey.user_id == user_id))
+            if key_row is None:
+                raise ClipForgeError("internal", "Add an API key before generating clips.")
+            provider = key_row.provider
+            base_url = key_row.base_url
+            model = key_row.model
+            encrypted_key = key_row.encrypted_key
+
+        score_token = decrypt_api_key(encrypted_key)
+        try:
+            push_secret(score_token)
+            scoring_duration = stored_duration_s
+            if scoring_duration is None:
+                scoring_duration = probe_media_duration(target_vod) or words[-1].end
+
+            def _on_score_chunk(done: int, total: int) -> None:
+                set_progress(uid, f"Scoring highlights ({done}/{total})")
+                refresh_job_lock(uid, lock_token)
+
+            windows = run_scoring(
+                words,
+                duration_s=scoring_duration,
+                api_key=score_token,
+                base_url=base_url,
+                model=model,
+                provider=provider,
+                max_clips=settings.max_clips_per_job,
+                job_id=str(uid),
+                on_chunk=_on_score_chunk,
+            )
+        finally:
+            del score_token
+
+        save_windows(w_path, windows)
+        log.info(
+            "score_done",
+            job_id=str(uid),
+            window_count=len(windows),
+        )
+
+    if STUB_AFTER_SCORE:
         raise ClipForgeError(
             "internal",
-            "Transcription finished. Later stages are not included in this build yet.",
+            "Scoring finished. Later stages are not included in this build yet.",
         )
 
 
@@ -398,6 +497,7 @@ def process_job(job_id: str) -> None:
             stop_event, refresh_thread = start_lock_refresher(job_id, lock_token)
             run_pipeline(job_id, lock_token)
         except SoftTimeLimitExceeded:
+            cancel_score_pool()
             fail_job(job_id, "timeout", "This job exceeded the 45 minute limit and was stopped.")
         except ClipForgeError as exc:
             fail_job(job_id, exc.error_code, exc.user_message)
