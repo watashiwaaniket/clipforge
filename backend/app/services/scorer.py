@@ -11,7 +11,7 @@ from typing import Any, Literal, Self
 
 import httpx
 import structlog
-from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -25,7 +25,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from app.errors import ClipForgeError
 from app.logging import secret_scope
-from app.services.providers import ProviderConfigError, check_outbound_url
+from app.services.providers import ProviderConfigError, build_openai_client
 from app.services.transcribe import Word
 
 log = structlog.get_logger()
@@ -497,17 +497,14 @@ def _default_client_factory(
     api_key: str, base_url: str, provider: str
 ) -> tuple[httpx.Client | None, Any]:
     try:
-        validated_url = check_outbound_url(base_url, provider=provider)
+        return build_openai_client(
+            api_key=api_key,
+            base_url=base_url,
+            provider=provider,
+            timeout=LLM_HTTP_TIMEOUT,
+        )
     except ProviderConfigError as exc:
         raise ClipForgeError("internal", str(exc)) from exc
-    http_client = httpx.Client(follow_redirects=False, timeout=LLM_HTTP_TIMEOUT)
-    client = OpenAI(
-        api_key=api_key,
-        base_url=validated_url,
-        http_client=http_client,
-        max_retries=0,
-    )
-    return http_client, client
 
 
 def score_transcript(
