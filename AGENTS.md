@@ -70,7 +70,11 @@ clipforge/
 ├── docker-compose.yml        # api, worker, db, redis (dev + prod same file)
 ├── .env.example              # every env var, documented
 ├── docs/
-│   └── ARCHITECTURE.md       # system design — read before backend work
+│   ├── README.md             # documentation index
+│   ├── ARCHITECTURE.md       # system blueprint — read before backend work
+│   ├── DESIGN.md             # MVP phases 1–6 design contract
+│   ├── internals/            # architectural decisions, provider design, pipeline invariants
+│   └── user/                 # user-facing guides
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -85,6 +89,7 @@ clipforge/
 │   │   │   ├── celery_app.py
 │   │   │   └── pipeline.py   # THE core: download → transcribe → score → clip
 │   │   ├── services/
+│   │   │   ├── providers/    # presets, SSRF url_policy, OpenAI client builder, errors
 │   │   │   ├── downloader.py # yt-dlp wrapper
 │   │   │   ├── transcribe.py # Whisper API behind `Transcriber` interface
 │   │   │   ├── scorer.py     # LLM highlight scoring + prompt + JSON schema

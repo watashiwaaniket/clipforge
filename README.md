@@ -30,4 +30,4 @@ Next.js + Tailwind · FastAPI · Celery + Redis · PostgreSQL · yt-dlp · Whisp
 - Frontend → Vercel (`NEXT_PUBLIC_API_URL` = your API origin)
 - Backend → any VPS with Docker: `docker compose up -d` + Caddy for TLS
 
-See docs/ARCHITECTURE.md for the full blueprint and AGENTS.md for contributor/agent rules.
+See [docs/README.md](docs/README.md) for user guides, internal architecture notes, and design specs, and [AGENTS.md](AGENTS.md) for contributor/agent rules.
