@@ -15,7 +15,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.db import session_scope
 from app.errors import ClipForgeError, TranscriptionFailed
-from app.logging import push_secret, secret_boundary, secret_scope
+from app.logging import push_secret, secret_boundary
 from app.models import ApiKey, Job
 from app.security import decrypt_api_key
 from app.services.downloader import probe_and_download, probe_media_duration
@@ -357,13 +357,12 @@ def run_pipeline(job_id: str, lock_token: str) -> None:
         whisper_key = _select_whisper_key(user_id)
         try:
             push_secret(whisper_key)
-            with secret_scope(whisper_key):
-                transcriber = build_transcriber(
-                    whisper_key,
-                    language=settings.whisper_language,
-                    on_chunk=_on_chunk,
-                )
-                words = transcriber.transcribe(target_vod)
+            transcriber = build_transcriber(
+                whisper_key,
+                language=settings.whisper_language,
+                on_chunk=_on_chunk,
+            )
+            words = transcriber.transcribe(target_vod)
         finally:
             del whisper_key
 
