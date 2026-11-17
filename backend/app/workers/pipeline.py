@@ -1,4 +1,5 @@
 import os
+import shutil
 import socket
 import threading
 from collections.abc import Callable
@@ -10,13 +11,13 @@ from uuid import UUID, uuid4
 import redis
 import structlog
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.config import settings
 from app.db import session_scope
 from app.errors import ClipForgeError, TranscriptionFailed
 from app.logging import push_secret, secret_boundary
-from app.models import ApiKey, Job
+from app.models import ApiKey, Clip, Job
 from app.security import decrypt_api_key
 from app.services.downloader import probe_and_download, probe_media_duration
 from app.services.jobs import ORDER, fail_job, is_terminal, set_progress, transition_job
@@ -29,10 +30,13 @@ from app.services.scorer import (
 )
 from app.services.storage import (
     cleanup_raw,
+    clip_relative_path,
+    clips_dir,
     ensure_job_dirs,
     transcript_path,
     vod_path,
     windows_path,
+    work_dir,
 )
 from app.services.transcribe import (
     Transcriber,
@@ -41,12 +45,19 @@ from app.services.transcribe import (
     load_transcript,
     save_transcript,
 )
+from app.services.video import (
+    VideoDimensions,
+    clip_error_message,
+    clip_error_stderr,
+    probe_video_dimensions,
+    render_clip,
+)
 from app.workers.celery_app import celery_app
 
 log = structlog.get_logger()
 
-# PHASE 3 ONLY. Deleted in phase 4 when clipping is real.
-STUB_AFTER_SCORE = True
+NO_WINDOWS_MESSAGE = "No clip-worthy moments in this VOD."
+ALL_CLIPS_FAILED_MESSAGE = "Finished, but every clip failed to export."
 
 JOB_LOCK_TTL_S = 60
 JOB_LOCK_REFRESH_INTERVAL_S = 20.0
@@ -325,6 +336,151 @@ def run_scoring(
     )
 
 
+def _advance_job(job_id: UUID, target_status: str, message: str) -> bool:
+    """Move the job forward when needed. False when the row is gone or already terminal."""
+    with session_scope() as session:
+        job = session.get(Job, job_id, with_for_update=True)
+        if job is None or job.status in {"completed", "failed"}:
+            return False
+        if ORDER.index(target_status) > ORDER.index(job.status):
+            prev_status = job.status
+            transition_job(session, job, target_status, message)
+            log.info(
+                "job_transition",
+                job_id=str(job_id),
+                **{"from": prev_status, "to": target_status},
+            )
+    return True
+
+
+def _reset_clip_outputs(job_id: UUID) -> None:
+    """Drop clip rows and files from an earlier attempt so a retry does not duplicate them."""
+    with session_scope() as session:
+        session.execute(delete(Clip).where(Clip.job_id == job_id))
+    for directory in (clips_dir(job_id), work_dir(job_id)):
+        if directory.exists():
+            shutil.rmtree(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+
+
+def _insert_clip(
+    job_id: UUID,
+    clip_id: UUID,
+    window: ScoredWindow,
+    *,
+    status: str,
+    caption_status: str,
+    file_path: str | None,
+    error: str | None,
+) -> None:
+    with session_scope() as session:
+        session.add(
+            Clip(
+                id=clip_id,
+                job_id=job_id,
+                start_s=window.start_s,
+                end_s=window.end_s,
+                score=window.score,
+                title=window.title,
+                hook=window.hook,
+                score_source=window.score_source,
+                file_path=file_path,
+                caption_status=caption_status,
+                status=status,
+                error=error,
+            )
+        )
+
+
+def run_clipping(
+    job_id: UUID,
+    lock_token: str,
+    *,
+    vod: Path,
+    windows: list[ScoredWindow],
+    words: list[Word],
+    duration_s: float | None,
+) -> None:
+    _reset_clip_outputs(job_id)
+
+    if not windows:
+        _advance_job(job_id, "completed", NO_WINDOWS_MESSAGE)
+        log.info("clip_done", job_id=str(job_id), ready=0, failed=0)
+        return
+
+    total = len(windows)
+    if not _advance_job(job_id, "clipping", f"Cutting clip 1 of {total}"):
+        return
+    refresh_job_lock(job_id, lock_token)
+
+    dimensions: VideoDimensions | None = None
+    probe_error: Exception | None = None
+    try:
+        dimensions = probe_video_dimensions(vod)
+    except SoftTimeLimitExceeded:
+        raise
+    except Exception as exc:
+        probe_error = exc
+        log.warning("clip_probe_failed", job_id=str(job_id), stderr=clip_error_stderr(exc))
+
+    clip_work_dir = work_dir(job_id)
+    clip_out_dir = clips_dir(job_id)
+    ready = 0
+    for index, window in enumerate(windows, start=1):
+        set_progress(job_id, f"Cutting clip {index} of {total}")
+        refresh_job_lock(job_id, lock_token)
+        clip_id = uuid4()
+        try:
+            if probe_error is not None:
+                raise probe_error
+            assert dimensions is not None
+            render_clip(
+                vod,
+                window,
+                words,
+                clip_work_dir,
+                clip_out_dir / f"{clip_id}.mp4",
+                clip_id=clip_id,
+                dimensions=dimensions,
+                duration_s=duration_s,
+            )
+        except SoftTimeLimitExceeded:
+            # Celery's soft limit is an Exception subclass; it must reach process_job.
+            raise
+        except Exception as exc:
+            log.exception(
+                "clip_failed",
+                job_id=str(job_id),
+                clip_index=index,
+                stderr=clip_error_stderr(exc),
+            )
+            _insert_clip(
+                job_id,
+                clip_id,
+                window,
+                status="failed",
+                caption_status="failed",
+                file_path=None,
+                error=clip_error_message(exc),
+            )
+            continue
+
+        _insert_clip(
+            job_id,
+            clip_id,
+            window,
+            status="ready",
+            caption_status="burned",
+            file_path=clip_relative_path(job_id, clip_id),
+            error=None,
+        )
+        ready += 1
+
+    message = f"Ready · {ready} clips" if ready else ALL_CLIPS_FAILED_MESSAGE
+    _advance_job(job_id, "completed", message)
+    log.info("clip_done", job_id=str(job_id), ready=ready, failed=total - ready)
+
+
 def run_pipeline(job_id: str, lock_token: str) -> None:
     uid = UUID(str(job_id))
     with session_scope() as session:
@@ -474,11 +630,17 @@ def run_pipeline(job_id: str, lock_token: str) -> None:
             window_count=len(windows),
         )
 
-    if STUB_AFTER_SCORE:
-        raise ClipForgeError(
-            "internal",
-            "Scoring finished. Later stages are not included in this build yet.",
-        )
+    media_duration_s = stored_duration_s
+    if media_duration_s is None:
+        media_duration_s = probe_media_duration(target_vod)
+    run_clipping(
+        uid,
+        lock_token,
+        vod=target_vod,
+        windows=windows,
+        words=words,
+        duration_s=media_duration_s,
+    )
 
 
 @celery_app.task(name="process_job", max_retries=0)

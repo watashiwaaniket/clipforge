@@ -89,7 +89,7 @@ def test_celery_time_limits_are_configured() -> None:
     assert "openai" not in pipeline_module.__dict__
 
 
-def test_process_job_stops_after_score(
+def test_process_job_completes_end_to_end(
     clean_db: None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -125,12 +125,22 @@ def test_process_job_stops_after_score(
             mp4_path.write_bytes(b"mp4-content")
             return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
         if argv[0] == "ffprobe":
-            return subprocess.CompletedProcess(
-                argv, 0, stdout=json.dumps({"format": {"duration": "180.0"}}), stderr=""
+            payload = (
+                {"streams": [{"width": 1920, "height": 1080}]}
+                if "stream=width,height" in argv
+                else {"format": {"duration": "180.0"}}
             )
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+        if argv[0] == "ffmpeg":
+            cwd = kwargs.get("cwd")
+            out_path = Path(str(cwd)) / argv[-1] if cwd else Path(argv[-1])
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(b"rendered-mp4")
+            return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
         raise AssertionError(f"Unexpected command: {argv}")
 
     monkeypatch.setattr("app.services.downloader.subprocess.run", fake_run)
+    monkeypatch.setattr("app.services.video.subprocess.run", fake_run)
 
     observed_statuses: list[str] = []
     original_transition = pipeline_module.transition_job
@@ -215,20 +225,26 @@ def test_process_job_stops_after_score(
             word_end=0,
         )
     ]
-    assert observed_statuses == ["downloading", "transcribing", "scoring"]
+    assert observed_statuses == ["downloading", "transcribing", "scoring", "clipping", "completed"]
 
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
-        assert job.status == "failed"
-        assert job.error == "Scoring finished. Later stages are not included in this build yet."
-        assert job.progress_message == "Scoring highlights (1/1)"
+        assert job.status == "completed"
+        assert job.error is None
+        assert job.progress_message == "Ready · 1 clips"
         assert job.title == "Pipeline Test VOD"
         assert job.duration_s == 180.0
         assert job.thumbnail_url == "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"
         assert job.attempt == 1
         assert job.started_at is not None
         assert job.finished_at is not None
+        clips = list(job.clips)
+        assert len(clips) == 1
+        assert clips[0].status == "ready"
+        assert clips[0].caption_status == "burned"
+        assert clips[0].file_path == f"jobs/{job_id}/clips/{clips[0].id}.mp4"
+        assert (tmp_path / clips[0].file_path).read_bytes() == b"rendered-mp4"
 
     r = redis.Redis.from_url(settings.redis_url)
     try:
@@ -482,8 +498,9 @@ def test_run_pipeline_resumes_valid_vod_transcript_and_windows(
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         assert job is not None
-        assert job.status == "failed"
-        assert job.error == "Scoring finished. Later stages are not included in this build yet."
+        assert job.status == "completed"
+        assert job.error is None
+        assert job.progress_message == "No clip-worthy moments in this VOD."
 
 
 def test_scoring_missing_api_key_row_fails_without_operator_fallback(
