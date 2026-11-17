@@ -17,6 +17,8 @@ celery_app.conf.update(
     task_ignore_result=True,
     worker_hijack_root_logger=False,
     worker_concurrency=1,
+    task_soft_time_limit=settings.job_timeout_seconds,
+    task_time_limit=settings.job_timeout_seconds + 60,
     broker_transport_options={"visibility_timeout": 7200},
     task_routes={
         "process_job": {"queue": "celery"},

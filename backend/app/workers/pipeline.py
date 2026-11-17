@@ -1,26 +1,38 @@
 import os
 import socket
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import redis
 import structlog
+from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy import select
 
 from app.config import settings
 from app.db import session_scope
-from app.errors import ClipForgeError
-from app.models import Job
+from app.errors import ClipForgeError, TranscriptionFailed
+from app.logging import push_secret, secret_boundary, secret_scope
+from app.models import ApiKey, Job
+from app.security import decrypt_api_key
 from app.services.downloader import probe_and_download, probe_media_duration
-from app.services.jobs import ORDER, fail_job, is_terminal, transition_job
-from app.services.storage import cleanup_raw, ensure_job_dirs, vod_path
+from app.services.jobs import ORDER, fail_job, is_terminal, set_progress, transition_job
+from app.services.storage import cleanup_raw, ensure_job_dirs, transcript_path, vod_path
+from app.services.transcribe import (
+    Transcriber,
+    WhisperApiTranscriber,
+    load_transcript,
+    save_transcript,
+)
 from app.workers.celery_app import celery_app
 
 log = structlog.get_logger()
 
-# PHASE 1 ONLY. Deleted in phase 2 when transcribe is real.
-STUB_AFTER_DOWNLOAD = True
+# PHASE 2 ONLY. Deleted in phase 3 when scoring is real.
+STUB_AFTER_TRANSCRIBE = True
 
 JOB_LOCK_TTL_S = 60
 JOB_LOCK_REFRESH_INTERVAL_S = 20.0
@@ -246,12 +258,41 @@ def _persist_download_metadata(
         job.updated_at = datetime.now(UTC)
 
 
+def _select_whisper_key(user_id: UUID) -> str:
+    with session_scope() as session:
+        row = session.scalar(select(ApiKey).where(ApiKey.user_id == user_id))
+        if row is not None:
+            host = (urlsplit(row.base_url).hostname or "").lower()
+            if host == "api.openai.com":
+                return decrypt_api_key(row.encrypted_key)
+
+    fallback = settings.openai_api_key.strip()
+    if fallback:
+        return fallback
+
+    raise TranscriptionFailed(
+        "Transcription needs an OpenAI Whisper key on the server, or an OpenAI key saved in "
+        "your account. Other providers can score clips but cannot transcribe in this build.",
+        error_code="transcribe_failed",
+    )
+
+
+def build_transcriber(
+    api_key: str,
+    *,
+    language: str,
+    on_chunk: Callable[[int, int], None] | None = None,
+) -> Transcriber:
+    return WhisperApiTranscriber(api_key, language=language, on_chunk=on_chunk)
+
+
 def run_pipeline(job_id: str, lock_token: str) -> None:
     uid = UUID(str(job_id))
     with session_scope() as session:
         job = session.get(Job, uid)
         if job is None or job.status in {"completed", "failed"}:
             return
+        user_id = job.user_id
         source_url = job.source_url
         stored_duration_s = job.duration_s
         if ORDER.index("downloading") > ORDER.index(job.status):
@@ -291,10 +332,54 @@ def run_pipeline(job_id: str, lock_token: str) -> None:
             thumbnail_url=result.thumbnail_url,
         )
 
-    if STUB_AFTER_DOWNLOAD:
+    t_path = transcript_path(uid)
+    words = load_transcript(t_path)
+    if words is None:
+        with session_scope() as session:
+            job = session.get(Job, uid)
+            if job is None or job.status in {"completed", "failed"}:
+                return
+            if ORDER.index("transcribing") > ORDER.index(job.status):
+                prev_status = job.status
+                transition_job(session, job, "transcribing", "Transcribing speech")
+                log.info(
+                    "job_transition",
+                    job_id=str(uid),
+                    **{"from": prev_status, "to": "transcribing"},
+                )
+
+        refresh_job_lock(uid, lock_token)
+
+        def _on_chunk(chunk_num: int, total_chunks: int) -> None:
+            set_progress(uid, f"Transcribing speech ({chunk_num}/{total_chunks})")
+            refresh_job_lock(uid, lock_token)
+
+        whisper_key = _select_whisper_key(user_id)
+        try:
+            push_secret(whisper_key)
+            with secret_scope(whisper_key):
+                transcriber = build_transcriber(
+                    whisper_key,
+                    language=settings.whisper_language,
+                    on_chunk=_on_chunk,
+                )
+                words = transcriber.transcribe(target_vod)
+        finally:
+            del whisper_key
+
+        save_transcript(t_path, words)
+        chunk_count = getattr(transcriber, "last_chunk_count", 0)
+        log.info(
+            "transcribe_done",
+            job_id=str(uid),
+            word_count=len(words),
+            chunks=chunk_count,
+        )
+
+    if STUB_AFTER_TRANSCRIBE:
         raise ClipForgeError(
             "internal",
-            "Download finished. Later stages are not included in this build yet.",
+            "Transcription finished. Later stages are not included in this build yet.",
         )
 
 
@@ -306,27 +391,30 @@ def process_job(job_id: str) -> None:
 
     stop_event: threading.Event | None = None
     refresh_thread: threading.Thread | None = None
-    try:
-        if decision == "stop":
-            return
-        assert lock_token is not None
-        stop_event, refresh_thread = start_lock_refresher(job_id, lock_token)
-        run_pipeline(job_id, lock_token)
-    except ClipForgeError as exc:
-        fail_job(job_id, exc.error_code, exc.user_message)
-    except Exception:
-        log.exception("job_crashed", job_id=job_id)
-        fail_job(job_id, "internal", "Something went wrong while processing this VOD.")
-    finally:
-        if stop_event is not None and refresh_thread is not None:
-            stop_event.set()
-            refresh_thread.join(timeout=5.0)
+    with secret_boundary():
         try:
-            if (
-                lock_token is not None
-                and is_terminal(job_id)
-                and holds_job_lock(job_id, lock_token)
-            ):
-                cleanup_raw(job_id)
+            if decision == "stop":
+                return
+            assert lock_token is not None
+            stop_event, refresh_thread = start_lock_refresher(job_id, lock_token)
+            run_pipeline(job_id, lock_token)
+        except SoftTimeLimitExceeded:
+            fail_job(job_id, "timeout", "This job exceeded the 45 minute limit and was stopped.")
+        except ClipForgeError as exc:
+            fail_job(job_id, exc.error_code, exc.user_message)
+        except Exception:
+            log.exception("job_crashed", job_id=job_id)
+            fail_job(job_id, "internal", "Something went wrong while processing this VOD.")
         finally:
-            release_job_lock(job_id, lock_token)
+            if stop_event is not None and refresh_thread is not None:
+                stop_event.set()
+                refresh_thread.join(timeout=5.0)
+            try:
+                if (
+                    lock_token is not None
+                    and is_terminal(job_id)
+                    and holds_job_lock(job_id, lock_token)
+                ):
+                    cleanup_raw(job_id)
+            finally:
+                release_job_lock(job_id, lock_token)
