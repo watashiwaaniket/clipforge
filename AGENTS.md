@@ -255,10 +255,10 @@ All endpoints except `/health` and `/auth/*` require Bearer JWT. Errors: `{"deta
 
 **Phase 5 — Dashboard**
 - [x] Auth (email+password MVP + local guest mode) and key/provider APIs
-- [ ] Key onboarding screen + provider/model picker on `/dashboard`
-- [ ] Jobs list with live status (TanStack Query `refetchInterval` 2.5s while active)
-- [ ] Job detail (`/jobs/[id]`): clip grid, score badge, title + copy button, video player (`/api/media/clips/[id]`), download
-- [ ] Failed states surfaced with the actual error message
+- [x] Key onboarding screen + provider/model picker on `/dashboard`
+- [x] Jobs list with live status (TanStack Query `refetchInterval` 2.5s while active)
+- [x] Job detail (`/jobs/[id]`): clip grid, score badge, title + copy button, video player (`/api/media/clips/[id]`), download
+- [x] Failed states surfaced with the actual error message
 
 **Phase 6 — Hardening**
 - [ ] Storage cleanup: delete raw VOD after job completes (keep clips)
