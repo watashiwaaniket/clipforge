@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from uuid import uuid4
 
 import httpx
@@ -19,8 +20,12 @@ from app.schemas import (
 )
 from app.security import encrypt_api_key
 from app.services.providers import (
+    ANTIGRAVITY_PROVIDER,
     ProviderConfigError,
+    build_antigravity_provider,
     build_openai_client,
+    is_local_antigravity_sentinel,
+    pick_antigravity_default_model,
     resolve_provider_config,
     strip_url_userinfo,
 )
@@ -38,6 +43,18 @@ def _validate_provider_key(
     model: str,
     plaintext_key: str,
 ) -> None:
+    if provider == ANTIGRAVITY_PROVIDER:
+        antigravity_provider = build_antigravity_provider(
+            credential=plaintext_key,
+            base_url=base_url,
+            model=model,
+            timeout=VALIDATION_TIMEOUT,
+            http_client_factory=httpx.Client,
+        )
+        with antigravity_provider:
+            antigravity_provider.validate_credentials()
+        return
+
     http_client, client = build_openai_client(
         api_key=plaintext_key,
         base_url=base_url,
@@ -61,16 +78,31 @@ def upsert_api_key(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> ApiKeyUpsertResponse:
-    plaintext_key = body.api_key.get_secret_value().strip()
-    if not plaintext_key:
+    raw_key = body.api_key.get_secret_value().strip() if body.api_key is not None else ""
+    if body.provider != ANTIGRAVITY_PROVIDER and not raw_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="API key cannot be empty.",
         )
 
-    with secret_scope(plaintext_key):
+    is_local_antigravity = body.provider == ANTIGRAVITY_PROVIDER and is_local_antigravity_sentinel(
+        raw_key
+    )
+    plaintext_key = "local" if is_local_antigravity else raw_key
+    scope_ctx = nullcontext() if is_local_antigravity else secret_scope(plaintext_key)
+
+    with scope_ctx:
+        requested_model = body.model
+        if body.provider == ANTIGRAVITY_PROVIDER and (
+            requested_model is None or not requested_model.strip()
+        ):
+            requested_model = pick_antigravity_default_model(
+                credential=plaintext_key,
+                http_client_factory=httpx.Client,
+            )
+
         try:
-            resolved = resolve_provider_config(body.provider, body.base_url, body.model)
+            resolved = resolve_provider_config(body.provider, body.base_url, requested_model)
         except ProviderConfigError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

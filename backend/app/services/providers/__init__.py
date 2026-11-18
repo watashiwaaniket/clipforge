@@ -1,14 +1,36 @@
+from app.services.providers.antigravity import (
+    ANTIGRAVITY_DEFAULT_BASE_URL,
+    ANTIGRAVITY_DEFAULT_MODEL,
+    ANTIGRAVITY_PROVIDER,
+    FALLBACK_ANTIGRAVITY_MODELS,
+    AntigravityApiError,
+    AntigravityCliError,
+    AntigravityError,
+    AntigravityProvider,
+    build_antigravity_provider,
+    is_local_antigravity_sentinel,
+    is_retryable_antigravity_error,
+    list_antigravity_models,
+    parse_agy_models_output,
+    pick_antigravity_default_model,
+    resolve_antigravity_config,
+)
+from app.services.providers.base import (
+    CompletionProvider,
+    ProviderModelInfo,
+    ResolvedProviderConfig,
+)
 from app.services.providers.client import build_openai_client
 from app.services.providers.errors import ProviderConfigError
 from app.services.providers.presets import (
     PROVIDER_PRESETS,
     ProviderPreset,
-    ResolvedProviderConfig,
     check_outbound_url,
     get_provider_preset,
     resolve_provider_config,
 )
 from app.services.providers.url_policy import (
+    ANTIGRAVITY_BRIDGE_HTTP_POLICY,
     DEFAULT_HTTPS_POLICY,
     OLLAMA_ALLOWED_HOSTS,
     OLLAMA_LOCAL_HTTP_POLICY,
@@ -18,17 +40,35 @@ from app.services.providers.url_policy import (
 )
 
 __all__ = [
+    "ANTIGRAVITY_BRIDGE_HTTP_POLICY",
+    "ANTIGRAVITY_DEFAULT_BASE_URL",
+    "ANTIGRAVITY_DEFAULT_MODEL",
+    "ANTIGRAVITY_PROVIDER",
     "DEFAULT_HTTPS_POLICY",
+    "FALLBACK_ANTIGRAVITY_MODELS",
     "OLLAMA_ALLOWED_HOSTS",
     "OLLAMA_LOCAL_HTTP_POLICY",
     "PROVIDER_PRESETS",
+    "AntigravityApiError",
+    "AntigravityCliError",
+    "AntigravityError",
+    "AntigravityProvider",
+    "CompletionProvider",
     "OutboundUrlPolicy",
     "ProviderConfigError",
+    "ProviderModelInfo",
     "ProviderPreset",
     "ResolvedProviderConfig",
+    "build_antigravity_provider",
     "build_openai_client",
     "check_outbound_url",
     "get_provider_preset",
+    "is_local_antigravity_sentinel",
+    "is_retryable_antigravity_error",
+    "list_antigravity_models",
+    "parse_agy_models_output",
+    "pick_antigravity_default_model",
+    "resolve_antigravity_config",
     "resolve_provider_config",
     "strip_url_userinfo",
     "validate_outbound_url",

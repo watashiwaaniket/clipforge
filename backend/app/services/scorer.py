@@ -4,6 +4,7 @@ import string
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -25,7 +26,15 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from app.errors import ClipForgeError
 from app.logging import secret_scope
-from app.services.providers import ProviderConfigError, build_openai_client
+from app.services.providers import (
+    ANTIGRAVITY_PROVIDER,
+    AntigravityProvider,
+    ProviderConfigError,
+    build_antigravity_provider,
+    build_openai_client,
+    is_local_antigravity_sentinel,
+    is_retryable_antigravity_error,
+)
 from app.services.transcribe import Word
 
 log = structlog.get_logger()
@@ -258,6 +267,24 @@ def _create_completion(
     model: str,
     messages: list[dict[str, str]],
 ) -> str | None:
+    if isinstance(client, AntigravityProvider):
+        @retry(
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=8),
+            retry=retry_if_exception(is_retryable_antigravity_error),
+            reraise=True,
+        )
+        def _run_antigravity() -> str | None:
+            return client.complete(
+                messages=messages,
+                temperature=LLM_TEMPERATURE,
+                max_tokens=LLM_MAX_TOKENS,
+                json_mode=True,
+                json_schema=HighlightResponse.model_json_schema(),
+            )
+
+        return _run_antigravity()
+
     def _invoke(include_response_format: bool) -> Any:
         @retry(
             stop=stop_after_attempt(3),
@@ -494,9 +521,17 @@ def merge_candidates(
 
 
 def _default_client_factory(
-    api_key: str, base_url: str, provider: str
-) -> tuple[httpx.Client | None, Any]:
+    api_key: str, base_url: str, provider: str, *, model: str = ""
+) -> tuple[Any, Any]:
     try:
+        if provider == ANTIGRAVITY_PROVIDER:
+            ag_provider = build_antigravity_provider(
+                credential=api_key,
+                base_url=base_url,
+                model=model,
+                timeout=LLM_HTTP_TIMEOUT,
+            )
+            return ag_provider, ag_provider
         return build_openai_client(
             api_key=api_key,
             base_url=base_url,
@@ -524,16 +559,20 @@ def score_transcript(
     if not chunks:
         return []
 
-    with secret_scope(api_key):
-        http_client: httpx.Client | None = None
+    skip_scope = provider == ANTIGRAVITY_PROVIDER and is_local_antigravity_sentinel(api_key)
+    scope_ctx = nullcontext() if skip_scope else secret_scope(api_key)
+    with scope_ctx:
+        closable: Any = None
         if client_factory is not None:
             created = client_factory(api_key, base_url)
             if isinstance(created, tuple) and len(created) == 2:
-                http_client, client = created
+                closable, client = created
             else:
                 client = created
         else:
-            http_client, client = _default_client_factory(api_key, base_url, provider)
+            closable, client = _default_client_factory(
+                api_key, base_url, provider, model=model
+            )
 
         total_chunks = len(chunks)
         raw_candidates: list[_RawCandidate] = []
@@ -579,8 +618,8 @@ def score_transcript(
             raise
         finally:
             _clear_active_pool(executor)
-            if http_client is not None:
-                http_client.close()
+            if closable is not None:
+                closable.close()
 
     return merge_candidates(words, raw_candidates, duration_s, max_clips=max_clips)
 

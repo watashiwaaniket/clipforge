@@ -61,8 +61,26 @@ set -a
 source .env
 set +a
 
+BRIDGE_PID=""
+cleanup_bridge() {
+  if [[ -n "$BRIDGE_PID" ]] && kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    kill "$BRIDGE_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup_bridge EXIT
+
+if command -v agy >/dev/null 2>&1 || [[ -x "$HOME/.local/bin/agy" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    if ! python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:11436/health', timeout=1)" >/dev/null 2>&1; then
+      python3 scripts/antigravity_bridge.py >/dev/null 2>&1 &
+      BRIDGE_PID=$!
+      echo "Started local Antigravity bridge on http://127.0.0.1:11436 (PID $BRIDGE_PID)"
+    fi
+  fi
+fi
+
 cd frontend
 if [[ ! -d node_modules ]]; then
   npm install
 fi
-exec npm run dev
+npm run dev
