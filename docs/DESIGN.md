@@ -16,9 +16,9 @@ This document is the implementation contract for the rest of the MVP. If it conf
 
 ClipForge is a bring-your-own-key web app that turns a public Twitch VOD or YouTube video into at most eight scored, captioned, 9:16 clips aimed at GTA 6 streamers. Phase 0 already boots the skeleton: FastAPI on `:8000` (`GET /api/v1/health` → `{"ok": true}`), an idle Celery worker, Postgres 16, Redis 7, a Next.js 15 landing page on the host, and pydantic-settings for the locked environment variables. There is no schema, no auth, no job API, and no pipeline.
 
-Phases 1–6 fill that skeleton in order. A signed-in user stores one OpenAI-compatible LLM key (Fernet-encrypted at rest). `POST /api/v1/jobs` does cheap validation only and returns `202 {"job_id": "..."}` without downloading anything. The Celery task `process_job` then downloads with yt-dlp, transcribes with the OpenAI Whisper API behind a `Transcriber` interface, scores ~45s transcript chunks with the user's key, and ffmpeg-cuts the top clips (center crop, loudness normalize, burned-in ASS karaoke). The dashboard polls every 2.5s while a job is active and plays or downloads finished clips. One clip failure cannot fail the job. Raw media is deleted after the job reaches `completed` or `failed`; final clips are kept.
+Phases 1–6 fill that skeleton in order. A signed-in user (or local guest workspace when `ALLOW_GUEST_AUTH=true`) stores one LLM provider configuration (OpenAI-compatible providers such as OpenAI, Groq, Together, Ollama, or custom `compatible`, plus the local/OAuth `antigravity` adapter, Fernet-encrypted at rest). `POST /api/v1/jobs` does cheap validation only and returns `202 {"job_id": "..."}` without downloading anything. The Celery task `process_job` then downloads with yt-dlp, transcribes with the OpenAI Whisper API behind a `Transcriber` interface, scores ~45s transcript chunks with the user's configured provider, and ffmpeg-cuts the top clips (center crop, loudness normalize, burned-in ASS karaoke). The dashboard polls every 2.5s while a job is active and plays or downloads finished clips. One clip failure cannot fail the job. Raw media is deleted after the job reaches `completed` or `failed`; final clips are kept.
 
-The HTTP process never holds a VOD, a transcript, or a decrypted key. Scoring always decrypts the user key inside the worker. Whisper decrypts that same key when the stored provider host is `api.openai.com`, and otherwise uses `OPENAI_API_KEY` when that fallback is set. The decrypted value is never logged.
+The HTTP process never holds a VOD, a transcript, or a decrypted key outside `POST /api/v1/keys` validation and `POST /api/v1/providers/antigravity/models` model discovery. Scoring always decrypts the user key inside the worker. Whisper decrypts that same key when the stored provider host is `api.openai.com`, and otherwise uses `OPENAI_API_KEY` when that fallback is set. The decrypted value is never logged.
 
 ---
 
@@ -43,7 +43,7 @@ Without these phases a user cannot sign in, store a key, submit a URL, or receiv
 
 ### Locked product
 
-User signs in, pastes one public Twitch VOD or YouTube URL, has one stored OpenAI-compatible LLM key, hits Generate. The worker downloads, word-level transcribes, scores viral moments for GTA 6 streaming, cuts the top clips, center-crops 9:16, burns karaoke captions. The dashboard lists jobs and plays or downloads clips. There is no in-browser editor.
+User signs in (or uses local guest mode when `ALLOW_GUEST_AUTH=true`), pastes one public Twitch VOD or YouTube URL, configures one LLM provider (`openai`, `groq`, `together`, `ollama`, `compatible`, or `antigravity`), hits Generate. The worker downloads, word-level transcribes, scores viral moments for GTA 6 streaming, cuts the top clips, center-crops 9:16, burns karaoke captions. The dashboard lists jobs and plays or downloads clips. There is no in-browser editor.
 
 ---
 
@@ -52,7 +52,7 @@ User signs in, pastes one public Twitch VOD or YouTube URL, has one stored OpenA
 ### Goals
 
 1. Ship phases 1–6 so `./start.sh` from a fresh clone yields a usable dashboard on `:3000` and API on `:8000`.
-2. A real public VOD plus a real OpenAI-compatible key produces captioned 9:16 clips with scores and titles. Typical 1–2 hour VODs finish in about 15 minutes. Hard stop is 45 minutes.
+2. A real public VOD plus a configured LLM provider key/bridge produces captioned 9:16 clips with scores and titles. Typical 1–2 hour VODs finish in about 15 minutes. Hard stop is 45 minutes.
 3. Every failure the user can hit has a `jobs.error` string (and a clip-level string when one export fails) and a stable `error_code` in logs.
 4. Prove, with tests, that a canary API key never appears in logs, task arguments, HTTP bodies, or Postgres plaintext columns.
 5. Stay inside the locked stack. No new language, framework, or database. No new Python runtime dependency: JWT verification and password hashing use the stdlib plus `cryptography.Fernet`, which is already pinned. Frontend additions are only the locked ones: Auth.js (`next-auth` 5), TanStack Query 5, and `jose` to sign HS256.
@@ -74,9 +74,9 @@ From `AGENTS.md` §2 and the product lock:
 
 1. **Duration and subscriber-only are worker failures, not `POST` rejections.** `detect_platform()` lives in `downloader.py` and is called on the HTTP path because it is a string check. `probe_and_download()` also lives in `downloader.py` and runs only inside `process_job`, where duration, liveness, and sub-only are known. `POST /api/v1/jobs` does not invoke yt-dlp. This overrides the single `docs/ARCHITECTURE.md` §7 row "VOD too long → rejected at POST, no job created" because `AGENTS.md` wins, golden rule 2 requires a job id in milliseconds, and §5 of the architecture doc already says POST only checks URL shape plus an active key. The user-facing strings from §3.1 are unchanged. Rationale is in [Rejection split](#rejection-split-post-vs-worker).
 
-2. **FastAPI owns `users` and `password_hash`. Auth.js issues the HS256 JWT. FastAPI only verifies it.** The frontend is on Vercel and must not open Postgres. Auth.js Credentials `authorize()` calls `POST /api/v1/auth/login`. The Auth.js `jwt` callback signs a compact JWS (`jose`, `alg=HS256`, shared `JWT_SECRET`). The default Auth.js cookie may stay encrypted; FastAPI never sees that cookie. It sees `Authorization: Bearer`. Do not use Auth.js's default JWE as the API credential — Python cannot verify it with the shared secret alone.
+2. **FastAPI owns `users` and `password_hash`. Auth.js issues the HS256 JWT. FastAPI only verifies it.** The frontend is on Vercel and must not open Postgres. Auth.js Credentials `authorize()` calls `POST /api/v1/auth/login` (or `POST /api/v1/auth/guest` when `ALLOW_GUEST_AUTH=true`). The Auth.js `jwt` callback signs a compact JWS (`jose`, `alg=HS256`, shared `JWT_SECRET`). The default Auth.js cookie may stay encrypted; FastAPI never sees that cookie. It sees `Authorization: Bearer`. Do not use Auth.js's default JWE as the API credential — Python cannot verify it with the shared secret alone.
 
-3. **One `api_keys` row per user, replaced by `POST /api/v1/keys`.** Ciphertext only. `GET` returns provider metadata and never key material, a prefix, or a hint. Scoring always uses the user key. Whisper uses that same key when the stored provider host is `api.openai.com`. `OPENAI_API_KEY` is only the Whisper fallback when the user did not store an OpenAI key, matching `.env.example` and `AGENTS.md` §6 ("User BYOK is primary"). It is never used to score. This closes the cost question: the operator is not billed for transcription while an OpenAI user key is on file.
+3. **One `api_keys` row per user, replaced by `POST /api/v1/keys`.** Ciphertext only (with a sentinel plaintext encrypted at rest when `antigravity` uses local CLI/bridge or local OAuth credentials). `GET` returns provider metadata (`provider`, `base_url`, `model`, timestamps) and never key material, a prefix, or a hint. Scoring always uses the user's configured provider. Whisper uses that same key when the stored provider host is `api.openai.com`. `OPENAI_API_KEY` is only the Whisper fallback when the user did not store an OpenAI key, matching `.env.example` and `AGENTS.md` §6 ("User BYOK is primary"). It is never used to score. This closes the cost question: the operator is not billed for transcription while an OpenAI user key is on file.
 
 4. **Word indices, never seconds, in the LLM contract.** Chunks are ~45s with a 40s step (~5s overlap). Invalid JSON gets one corrective retry, then a deterministic heuristic tags `score_source=heuristic`. The v1 system prompt still says "return an empty list" and is not edited. Before a reply counts as invalid JSON, a bare JSON list is wrapped as `{"highlights": ...}`. A validated empty highlight list, either shape, is zero windows and does not call the heuristic. Non-maximum suppression runs on the padded intervals, not the raw ones.
 
@@ -205,7 +205,8 @@ Progress strings the UI prints verbatim:
 | Download starts | `Downloading the VOD` |
 | Metadata known | `Downloading · {title} · {minutes} min` |
 | Whisper chunk | `Transcribing speech ({n}/{chunks})` |
-| Score chunk | `Scoring moments ({n}/{chunks})` |
+| Scoring starts | `Scoring transcript for highlights` |
+| Score chunk | `Scoring highlights ({n}/{chunks})` |
 | Each clip | `Cutting clip {i} of {n}` |
 | Success with clips | `Ready · {ready} clips` |
 | Success, model returned nothing | `No clip-worthy moments in this VOD.` |
@@ -862,7 +863,7 @@ if STUB_AFTER_SCORE:
 
 A job can mix sources. Each clip stores its own `score_source`. Default for LLM successes is `llm`. If the stored key decrypts but every chunk falls back, the job still completes. Progress message on a mixed or fallback job stays the normal ready line; the badge on each clip tells the truth. Decrypt failure is different: raise `InvalidStoredKey` with `The saved API key could not be decrypted. Enter it again.` That fails the job, because there is no key to retry with and the heuristic would hide a broken Fernet configuration.
 
-Decrypt happens at the start of scoring, in a local variable, inside `try/finally: del token`. The OpenAI client is constructed there and not stored on the task instance.
+Decrypt happens at the start of scoring, in a local variable, wrapped by `push_secret` / `secret_scope` and cleared in `finally: del token`. For OpenAI-compatible providers (`openai`, `groq`, `together`, `ollama`, `compatible`), `scorer.py` calls `build_openai_client()` in `backend/app/services/providers/client.py`, which runs `validate_outbound_url` / `check_outbound_url` before constructing:
 
 ```python
 http_client = httpx.Client(follow_redirects=False, timeout=httpx.Timeout(30.0, connect=5.0))
@@ -874,7 +875,7 @@ client = OpenAI(
 )
 ```
 
-`check_outbound_url(base_url)` runs before this constructor. The rules are in [API keys](#api-keys). A 302 is not followed.
+For `provider="antigravity"`, `scorer.py` builds an `AntigravityProvider` (`CompletionProvider` protocol) via `build_antigravity_provider()`, using the stored credential (`"local"` sentinel for local CLI/bridge/OAuth, or an explicit OAuth token/JSON bundle). Transient Antigravity errors fall back to the heuristic per chunk just like OpenAI-compatible transport failures.
 
 `base_url` and `model` come from the `api_keys` row (resolved presets in [API keys](#api-keys)). If the user deletes the row between download and scoring, fail the job with `Add an API key before generating clips.` Do not crash and do not switch to `OPENAI_API_KEY`.
 
@@ -1036,11 +1037,15 @@ FastAPI stores users. Auth.js does not.
 
 `POST /api/v1/auth/login` `{email, password}` → `200 {id, email}`.
 
-These two routes are the only authenticated-API exceptions besides `GET /api/v1/health`. They do not set cookies and do not return a token. `AGENTS.md` §8 said every non-health route requires a bearer token; issuing that token requires a login route. The token is still minted only in Auth.js.
+`GET /api/v1/auth/config` → `200 {"guest_enabled": bool}` (reflects `ALLOW_GUEST_AUTH`, default `false`; `.env.example` enables `true` for local-first clones).
 
-Password: 10 to 128 characters. Store `scrypt$131072$8$1${salt_b64}${hash_b64}` in `users.password_hash`. `hashlib.scrypt(..., n=2**17, r=8, p=1, dklen=32)`, 16-byte salt. `n=16384` is below the OWASP interactive choice and is not used. Verify with `hmac.compare_digest` on the derived key. Login of an unknown email still runs scrypt against a fixed dummy hash so the missing-user path is not obviously faster. Login failure and duplicate registration both return `400` with `Invalid email or password.` A short password on register is a different `400` (`Password must be at least 10 characters.`) because that is not an existence check. Email is trimmed and lowercased, must contain one `@`, no spaces, length 3–254. No verification mail.
+`POST /api/v1/auth/guest` → `200 {id, email}` when `ALLOW_GUEST_AUTH=true` (returns `403 Guest access is disabled.` otherwise). Creates or loads the local workspace user `local@clipforge.local` with an unusable password hash (`"!"`) so password login never accepts it. Also enforces the Redis IP rate limit below.
 
-Rate limit login and register with Redis: `INCR` key `rl:auth:{ip}` with 60s TTL, 10 attempts, then `429 Too many sign-in attempts. Wait a minute.` Client IP:
+These auth routes are the only authenticated-API exceptions besides `GET /api/v1/health`. They do not set cookies and do not return a token. `AGENTS.md` §8 said every non-health route requires a bearer token; issuing that token requires auth routes. The token is still minted only in Auth.js.
+
+Password: 10 to 128 characters. Store `scrypt$131072$8$1${salt_b64}${hash_b64}` in `users.password_hash`. `hashlib.scrypt(..., n=2**17, r=8, p=1, dklen=32)`, 16-byte salt. `n=16384` is below the OWASP interactive choice and is not used. Verify with `hmac.compare_digest` on the derived key. Login of an unknown email (or `local@clipforge.local` with unusable hash) still runs scrypt against a fixed dummy hash so the missing-user path is not obviously faster. Login failure, registration of the reserved guest email, and duplicate registration all return `400` with `Invalid email or password.` A short password on register is a different `400` (`Password must be at least 10 characters.`) because that is not an existence check. Email is trimmed and lowercased, must contain one `@`, no spaces, length 3–254. No verification mail.
+
+Rate limit login, register, and guest login with Redis: `INCR` key `rl:auth:{ip}` with 60s TTL, 10 attempts, then `429 Too many sign-in attempts. Wait a minute.` Client IP:
 
 - `TRUST_PROXY_COUNT` defaults to `0`. Use the socket peer and ignore `X-Forwarded-For`.
 - When the count is `N > 0`, split the header on commas, strip whitespace, and take index `-N` (from the right). Caddy appends the peer it saw, so with `TRUST_PROXY_COUNT=1` the rightmost hop is that peer. The leftmost hop is the value the client can forge (`forged, real` must limit `real`).
@@ -1049,26 +1054,29 @@ Rate limit login and register with Redis: `INCR` key `rl:auth:{ip}` with 60s TTL
 
 Do not log the password. The redaction processor drops fields named `password`.
 
-JWT minted in `frontend/auth.ts`. The callback must assign `token.accessToken` and return `token`. A local variable that is never stored is not a session.
+JWT minted in `frontend/auth.ts` (building on Edge-safe `frontend/auth.config.ts`). The callback must assign `token.accessToken` and `token.accessTokenExpiresAt` and return `token` (returning `null` once `isTokenExpired(token)` is true). A local variable that is never stored is not a session.
 
 ```typescript
 callbacks: {
+  ...authConfig.callbacks,
   async jwt({ token, user }) {
     if (user) {
+      const now = Math.floor(Date.now() / 1000);
       token.sub = user.id;
+      token.accessTokenExpiresAt = now + SESSION_MAX_AGE_S;
       token.accessToken = await new SignJWT({ sub: user.id })
         .setProtectedHeader({ alg: "HS256" })
         .setIssuer("clipforge")
         .setAudience("clipforge-api")
-        .setIssuedAt()
-        .setExpirationTime("24h")
-        .sign(new TextEncoder().encode(process.env.JWT_SECRET));
+        .setIssuedAt(now)
+        .setExpirationTime(now + SESSION_MAX_AGE_S)
+        .sign(new TextEncoder().encode(secret));
+      return token;
+    }
+    if (isTokenExpired(token)) {
+      return null;
     }
     return token;
-  },
-  async session({ session, token }) {
-    session.accessToken = token.accessToken;
-    return session;
   },
 },
 ```
@@ -1094,22 +1102,23 @@ PR 2 commits `backend/tests/fixtures/jwt_jose.json` produced by the same `SignJW
 
 Frontend files:
 
-- `frontend/auth.ts` — Auth.js v5 config (`next-auth` 5.x, not v4).
+- `frontend/auth.ts` — Auth.js v5 config (`next-auth` 5.x, not v4) with `credentials` and `guest` providers; server fetches use `API_URL ?? NEXT_PUBLIC_API_URL`.
+- `frontend/auth.config.ts` — Edge-safe Auth.js config for middleware and expiry checks.
 - `frontend/app/api/auth/[...nextauth]/route.ts` — export `handlers`.
 - `frontend/app/api/media/clips/[id]/route.ts` — streaming proxy.
-- `frontend/app/login/page.tsx`, `frontend/app/register/page.tsx`.
+- `frontend/app/login/page.tsx`, `frontend/app/login/login-form.tsx`, `frontend/app/register/page.tsx`, `frontend/app/register/register-form.tsx`, `frontend/app/skip-signin-button.tsx`.
 - `frontend/app/dashboard/page.tsx`, `frontend/app/jobs/[id]/page.tsx`.
 - `frontend/app/providers.tsx` — `SessionProvider` and `QueryClientProvider`.
-- `frontend/lib/api.ts`, `frontend/lib/jobs.ts`.
+- `frontend/lib/auth-mode.ts`, `frontend/lib/api.ts`, `frontend/lib/jobs.ts`.
 - `frontend/middleware.ts` — unauthenticated visits to `/dashboard` and `/jobs` redirect to `/login`.
 
-`authorize()` POSTs to `/api/v1/auth/login` and returns `{id, email}` or `null`. Register page POSTs to `/api/v1/auth/register`, then `signIn("credentials", ...)`.
+`authorize()` POSTs to `/api/v1/auth/login` (or `/api/v1/auth/guest` for the `guest` provider) and returns `{id, email}` or `null`. Register page POSTs to `/api/v1/auth/register`, then `signIn("credentials", ...)`.
 
-Landing page (`frontend/app/page.tsx`) keeps its layout. Header gains a link: `Sign in` or `Dashboard` from the session. Footer line `Dashboard and sign-in land with the job pipeline.` is replaced with a link to `/dashboard`. Do not restyle the page.
+Landing page (`frontend/app/page.tsx`) keeps its layout. Header gains a link: `Sign in` or `Dashboard` from the session, plus `Skip sign-in` when `!session && guestEnabled`. Footer line `Dashboard and sign-in land with the job pipeline.` is replaced with a link to `/dashboard`. Do not restyle the page.
 
 `JWT_SECRET` on Vercel must equal `JWT_SECRET` on the VPS. It is a server env var, never `NEXT_PUBLIC_`. `AUTH_SECRET` is a different value, generated the same way, used only by Auth.js to encrypt its session cookie. `AUTH_URL` is the Vercel origin in production and `http://localhost:3000` in dev.
 
-#### API keys
+#### API keys & Provider Catalog
 
 `POST /api/v1/keys`
 
@@ -1117,7 +1126,7 @@ Landing page (`frontend/app/page.tsx`) keeps its layout. Header gains a link: `S
 { "provider": "openai", "api_key": "sk-...", "base_url": null, "model": null }
 ```
 
-`provider` is one of `openai`, `groq`, `together`, `ollama`, `compatible`.
+`provider` is one of `openai`, `groq`, `together`, `ollama`, `compatible`, `antigravity`.
 
 | provider | default base_url | default model |
 |---|---|---|
@@ -1126,25 +1135,38 @@ Landing page (`frontend/app/page.tsx`) keeps its layout. Header gains a link: `S
 | `together` | `https://api.together.xyz/v1` | `meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo` |
 | `ollama` | `http://host.docker.internal:11434/v1` | `llama3.1` |
 | `compatible` | required | required |
+| `antigravity` | `https://daily-cloudcode-pa.googleapis.com` | `gemini-4-hydrogen` (or first live `gemini-*` model when connected) |
 
-The model table will go stale. It lives in `backend/app/services/providers/presets.py` as data, not as scattered strings, so one PR can update it. `model` on the request overrides the preset model. `base_url` overrides the preset only for `ollama` and `compatible`. `openai`, `groq`, and `together` are locked to the preset origin; a client-supplied `base_url` for those three is 400 `That provider uses a fixed base URL.` `compatible` without both `base_url` and `model` is 400 `Provider "compatible" needs a base URL and a model.`
+The OpenAI-compatible preset table lives in `backend/app/services/providers/presets.py` as data, not as scattered strings, while the `antigravity` non-OpenAI adapter lives in `backend/app/services/providers/antigravity/` behind `CompletionProvider` (`base.py`). `model` on the request overrides the default model (`antigravity` auto-picks an accepted live model if `model` is omitted while connected). `base_url` overrides the preset only for `ollama` and `compatible`. `openai`, `groq`, `together`, and `antigravity` are locked to their origin; a client-supplied `base_url` for those four is 400 `That provider uses a fixed base URL.` `compatible` without both `base_url` and `model` is 400 `Provider "compatible" needs a base URL and a model.`
 
-`check_outbound_url` runs in the API process before the validation call and again in the worker before scoring:
+`api_key` is `SecretStr | None` (`max_length=4096`). For all OpenAI-compatible providers, an empty `api_key` returns `400 API key cannot be empty.` For `antigravity`, omitting `api_key` (or sending `"local"`, `"cli"`, `"oauth"`, `"antigravity-local"`) stores `"local"` and uses local `agy` CLI (`ANTIGRAVITY_CLI_BIN`), the host bridge (`scripts/antigravity_bridge.py` via `ANTIGRAVITY_BRIDGE_URL`, auto-started by `start.sh`), or local OAuth credentials (`ANTIGRAVITY_OAUTH_CREDS_PATH` / `~/.gemini/oauth_creds.json`); callers may also supply an OAuth access token or OAuth JSON bundle directly.
 
-- Reject userinfo.
-- `ollama` may use `http` only, host exactly `host.docker.internal`, `localhost`, or `127.0.0.1`, optional port, path empty or ending in `/v1`. No other provider may use `http` or those hosts.
-- `compatible` must be `https`, and the host must be a DNS name, not an IP literal. Resolve every A and AAAA record immediately before the call. Reject the URL if any address is loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`, which includes `169.254.169.254`), private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`), `0.0.0.0/8`, or multicast. Also reject the names `metadata.google.internal` and `metadata.google.com` without resolving them. If resolution fails, reject.
+`check_outbound_url` / `validate_outbound_url` (`backend/app/services/providers/url_policy.py`) runs in the API process before the validation call and again in the worker before scoring:
+
+- Reject userinfo, query strings, and fragments.
+- `ollama` (`OLLAMA_LOCAL_HTTP_POLICY`) may use `http` only, host exactly `host.docker.internal`, `localhost`, or `127.0.0.1`, optional port, path empty or ending in `/v1`.
+- `antigravity` bridge URLs (`ANTIGRAVITY_BRIDGE_HTTP_POLICY`) may use `http` strictly for `host.docker.internal`, `localhost`, or `127.0.0.1` at the root path (non-local bridge URLs must use `https` under `DEFAULT_HTTPS_POLICY`).
+- `compatible` (`DEFAULT_HTTPS_POLICY`) must be `https`, and the host must be a DNS name, not an IP literal. Resolve every A and AAAA record immediately before the call. Reject the URL if any address is loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`, which includes `169.254.169.254`), private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`), `0.0.0.0/8`, or multicast. Also reject the names `metadata.google.internal` and `metadata.google.com` without resolving them. If resolution fails, reject.
 - `https://169.254.169.254/` and `https://10.0.0.5/` fail this check. They are not saved by being `https`.
 
-Every OpenAI SDK client, including Whisper and the validation call, is built on `httpx.Client(follow_redirects=False)`. A 301 or 302 is a failure. Do not open a second connection to the `Location`. The key is sent only as the `Authorization` header by the SDK, never interpolated into the URL. Residual DNS rebinding between the check and the connect is accepted for MVP only because redirects are off and the check is immediately before the call; do not "fix" it by turning redirects on.
+Every OpenAI SDK client, including Whisper and the validation call, is built via `build_openai_client()` on `httpx.Client(follow_redirects=False)`. A 301 or 302 is a failure. Do not open a second connection to the `Location`. The key is sent only as the `Authorization` header by the SDK, never interpolated into the URL. Residual DNS rebinding between the check and the connect is accepted for MVP only because redirects are off and the check is immediately before the call; do not "fix" it by turning redirects on.
 
-Validation (this is the "validate + encrypt store" step, and it is allowed on the HTTP path because it is one short RPC, not a VOD): `POST {base}/chat/completions` with `max_tokens=1`, timeout 8s, a single user message `ping`. On non-2xx or on a redirect, `400 That key was rejected by the provider.` Do not copy the upstream body into the response or the log. On success, encrypt and upsert. `push_secret` the plaintext for the rest of the request so a later exception cannot log it.
+Validation (allowed on the HTTP path because it is one short RPC, not a VOD):
+- OpenAI-compatible providers: `POST {base}/chat/completions` with `max_tokens=1`, timeout 8s, a single user message `ping`. On non-2xx or on a redirect, `400 That key was rejected by the provider.`
+- `antigravity`: `AntigravityProvider.validate_credentials()` verifies the CLI, host bridge, or OAuth session with the same 8s HTTP timeout (15s CLI timeout).
+- Do not copy upstream bodies into the response or log. On success, encrypt and upsert. Wrap the plaintext in `secret_scope()` (`push_secret`) for the rest of the request so a later exception cannot log it.
 
-Upsert: delete the existing `api_keys` row for `user_id` if present, insert one row, in one transaction. Unique constraint on `api_keys.user_id` makes a double-insert fail. Response `200 {"configured": true, "provider": "openai", "model": "gpt-4o-mini"}`. The response has no `api_key` field. The request handler must not bind the key into a structlog call. Pydantic model uses `SecretStr` and a custom serializer that raises if someone adds it to a response model by mistake — simpler: the response schema has no such field, and a test covers the body.
+Upsert: `INSERT ... ON CONFLICT (user_id) DO UPDATE` in one transaction. Unique constraint on `api_keys.user_id` prevents multiple rows. Response `200 {"configured": true, "provider": "openai", "model": "gpt-4o-mini"}`. The response has no `api_key` field. The request handler must not bind the key into a structlog call.
 
 `GET /api/v1/keys` → `{"configured": false}` or `{"configured": true, "provider", "model", "base_url"}` with userinfo stripped. Not in the original route table; the onboarding screen cannot function without a metadata read. It does not return ciphertext.
 
 `DELETE /api/v1/keys` → 204. Idempotent if no row.
+
+Provider catalog & model discovery (`backend/app/api/providers.py`, `backend/app/services/providers/catalog.py`), all bearer-authenticated:
+
+- `GET /api/v1/providers` → `{"providers": [...]}` returning metadata, defaults, `requires_api_key`, `locked_base_url`, `requires_custom_config`, `connected`, `model_source`, and `models` for all 6 providers (live-probing `ollama` via `/api/tags` and `antigravity` via CLI/bridge/OAuth, falling back to curated static lists otherwise).
+- `GET /api/v1/providers/{provider}/models` → `{"provider", "connected", "model_source", "default_model", "models"}`.
+- `POST /api/v1/providers/antigravity/models` `{api_key?}` → probes live `antigravity` models for a supplied OAuth token/JSON (or `"local"`) inside `secret_scope()` without saving it.
 
 Fernet: `Fernet(settings.encryption_key.encode())`. Store the token bytes in `encrypted_key`. Decrypt only in the worker. A bad token raises `InvalidStoredKey`.
 
@@ -1175,7 +1197,7 @@ All routes depend on `get_current_user`. Queries filter `user_id`. Another user'
   "duration_s": 3600,
   "thumbnail_url": null,
   "status": "scoring",
-  "progress_message": "Scoring moments (12/80)",
+  "progress_message": "Scoring highlights (12/80)",
   "error": null,
   "created_at": "...",
   "updated_at": "...",
@@ -1214,7 +1236,7 @@ Match the landing tokens already in `frontend/app/globals.css` and `frontend/tai
 Dashboard (`/dashboard`):
 
 - Header: wordmark, existing `HealthPill`, sign out.
-- If `GET /api/v1/keys` has `configured: false`, show a panel that blocks Generate: provider `<select>`, key `<input type="password" autoComplete="off">`, optional base URL and model, submit `Save key`. After save, clear the input state, show provider and model, and offer `Replace` and `Delete`. Never put the key in the query string, localStorage, or a toast.
+- If `GET /api/v1/keys` has `configured: false`, show a panel that blocks Generate: provider `<select>` (populated from `GET /api/v1/providers` so `openai`, `groq`, `together`, `ollama`, `compatible`, and `antigravity` plus discovered models/connection state are available), key `<input type="password" autoComplete="off">` (optional when `requires_api_key === false` for `antigravity`), optional base URL and model selector/input, submit `Save key`. After save, clear the input state, show provider and model, and offer `Replace` and `Delete`. Never put the key in the query string, localStorage, or a toast.
 - Generate form: URL input, button `Generate`, disabled while the mutation is in flight. Helper text: max 240 minutes, up to 8 clips, and the architecture hint that Twitch VODs expire after 14 days (60 for Partners).
 - Job list: status pill, truncated URL, relative time, `progress_message`, and if `error` is set an alert with that exact string. Each row links to `/jobs/{id}`.
 - TanStack Query key `["jobs"]`. `refetchInterval` is `listRefetchInterval` of the row statuses. Also `refetchOnWindowFocus: true`. `enabled` is `Boolean(session.accessToken)`. Do not fire the request with an empty bearer while the session is still resolving, or the client will stick on 401.
@@ -1388,8 +1410,13 @@ Phase 0 has only `GET /api/v1/health`. Everything else is new. Errors stay `{"de
 | Method | Path | Auth | Success |
 |---|---|---|---|
 | `GET` | `/api/v1/health` | no | `200 {"ok": true}` unchanged |
+| `GET` | `/api/v1/auth/config` | no | `200 {"guest_enabled": bool}` |
 | `POST` | `/api/v1/auth/register` | no | `201 {id, email}` |
 | `POST` | `/api/v1/auth/login` | no | `200 {id, email}` |
+| `POST` | `/api/v1/auth/guest` | no | `200 {id, email}` (when `ALLOW_GUEST_AUTH=true`) |
+| `GET` | `/api/v1/providers` | bearer | `200 {providers}` |
+| `GET` | `/api/v1/providers/{provider}/models` | bearer | `200 {provider, connected, model_source, default_model, models}` |
+| `POST` | `/api/v1/providers/antigravity/models` | bearer | `200 {provider, connected, model_source, default_model, models}` |
 | `POST` | `/api/v1/keys` | bearer | `200 {configured, provider, model}` |
 | `GET` | `/api/v1/keys` | bearer | `200` metadata only |
 | `DELETE` | `/api/v1/keys` | bearer | `204` |
@@ -1398,7 +1425,7 @@ Phase 0 has only `GET /api/v1/health`. Everything else is new. Errors stay `{"de
 | `GET` | `/api/v1/jobs/{id}` | bearer | `200` job plus clips |
 | `GET` | `/api/v1/clips/{id}/video` | bearer | `200`/`206` `video/mp4` |
 
-`GET /api/v1/keys` and the extra job fields are the only expansions of the `AGENTS.md` §8 shapes. They are additive. `file_path` is intentionally not in any response.
+`GET /api/v1/keys`, the `/api/v1/auth/{config,guest}` routes, the `/api/v1/providers*` catalog routes, and the extra job fields are expansions of the `AGENTS.md` §8 baseline. They are additive. `file_path` is intentionally not in any response.
 
 Python interfaces the rest of the pipeline codes against:
 
@@ -1409,9 +1436,25 @@ def probe_and_download(url: str, job_dir: Path) -> DownloadResult: ...
 class Transcriber(Protocol):
     def transcribe(self, audio_path: Path) -> list[Word]: ...
 
-def score_transcript(client: OpenAI, model: str, words: list[Word], limit: int) -> list[ScoredWindow]: ...
+class CompletionProvider(Protocol):
+    def complete_json(self, *, system_prompt: str, user_prompt: str) -> str: ...
+
+def score_transcript(
+    words: list[Word],
+    *,
+    duration_s: float,
+    api_key: str = "",
+    base_url: str = "",
+    model: str = "",
+    provider: str = "compatible",
+    max_clips: int = 8,
+    job_id: str | None = None,
+    client: Any | None = None,
+    on_chunk: Callable[[int, int], None] | None = None,
+) -> list[ScoredWindow]: ...
+
 def render_clip(vod: Path, window: ScoredWindow, words: list[Word], work_dir: Path, out_path: Path) -> None: ...
-def cleanup_raw(job_id: UUID) -> None: ...
+def cleanup_raw(job_id: UUID | str) -> None: ...
 def transition_job(session: Session, job: Job, new_status: str, message: str) -> None: ...
 ```
 
@@ -1421,7 +1464,7 @@ Frontend fetch wrapper `frontend/lib/api.ts` sets `Authorization: Bearer ${sessi
 
 ## Data Model Changes
 
-No tables exist today (`backend/app/db.py` defines `Base` only). One Alembic revision, `backend/alembic/versions/0001_initial.py`, created by hand so review sees the SQL. `backend/alembic/env.py` reads `settings.database_url` and `target_metadata = Base.metadata`. `backend/alembic.ini` points `script_location` at `alembic`.
+No tables exist in Phase 0 (`backend/app/db.py` defines `Base` only). `backend/alembic/versions/0001_initial.py` creates the four core tables, and `backend/alembic/versions/0002_add_antigravity_provider.py` extends `ck_api_keys_provider` to allow `'antigravity'`. `backend/alembic/env.py` reads `settings.database_url` and `target_metadata = Base.metadata`. `backend/alembic.ini` points `script_location` at `alembic`.
 
 UUIDs are `sqlalchemy.Uuid(as_uuid=True)` with `uuid4` defaults. Timestamps are `DateTime(timezone=True)`, UTC, `server_default=func.now()`.
 
@@ -1431,7 +1474,7 @@ UUIDs are `sqlalchemy.Uuid(as_uuid=True)` with `uuid4` defaults. Timestamps are 
 |---|---|---|
 | `id` | UUID PK | |
 | `email` | TEXT NOT NULL UNIQUE | stored lowercased |
-| `password_hash` | TEXT NOT NULL | scrypt string, never a bare hash |
+| `password_hash` | TEXT NOT NULL | scrypt string (or `"!"` for local guest), never a bare hash |
 | `created_at` | timestamptz | |
 
 ### `api_keys`
@@ -1440,7 +1483,7 @@ UUIDs are `sqlalchemy.Uuid(as_uuid=True)` with `uuid4` defaults. Timestamps are 
 |---|---|---|
 | `id` | UUID PK | |
 | `user_id` | UUID NOT NULL UNIQUE FK → `users.id` ON DELETE CASCADE | one active key |
-| `provider` | TEXT NOT NULL | check in the provider set |
+| `provider` | TEXT NOT NULL | check in `('openai', 'groq', 'together', 'ollama', 'compatible', 'antigravity')` |
 | `encrypted_key` | BYTEA NOT NULL | Fernet token |
 | `base_url` | TEXT NOT NULL | no userinfo |
 | `model` | TEXT NOT NULL | |
@@ -1501,7 +1544,7 @@ Check constraints enforce the enums above, `score BETWEEN 0 AND 100`, and `end_s
 
 ### Migration and rollback
 
-Forward: `docker compose exec -T api alembic upgrade head` from `start.sh`, `start.ps1`, and the deploy note. Empty database today, so this is the first revision.
+Forward: `docker compose exec -T api alembic upgrade head` from `start.sh`, `start.ps1`, and the deploy note. Empty database in Phase 0, with `0001_initial` creating the schema and `0002_add_antigravity_provider` updating `ck_api_keys_provider`.
 
 Rollback of `0001` drops all four tables. Allowed on a dev database only. Do not write a data migration; there is no production data in Phase 0. Later revisions must be additive (new nullable columns, new indexes) so a code rollback does not require a down revision.
 
@@ -1569,7 +1612,7 @@ Closer to a typical SPA, and easier for `scripts/smoke.sh`. Rejected as the prim
 | Auth.js default JWE used as the bearer token | High | Custom `SignJWT` HS256 in the `jwt` callback. FastAPI rejects other `alg` values including `none`. |
 | XSS steals `session.accessToken` | Medium | Intentional: JSON calls send the bearer from page JS (Key Decision 14). Expiry is 24 hours, not 7 days. React escapes text. No `dangerouslySetInnerHTML`. No markdown renderer. The media route does not put the token in a URL. `AUTH_SECRET` ≠ `JWT_SECRET`. CSP is a follow-up, not this MVP. |
 | User A reads user B's job or clip | High | Every query filters `user_id`. Mismatch is 404. Video route uses the same check. Tests cover it. |
-| SSRF via yt-dlp or `base_url` | Medium | URL allow-list before yt-dlp. No cookies. Preset providers are locked to their origins. `compatible` is https plus a public resolved address. Ollama is the only http exception (`host.docker.internal`, `localhost`, `127.0.0.1`). `follow_redirects=False` on every SDK client. Userinfo rejected. |
+| SSRF via yt-dlp or `base_url` | Medium | URL allow-list before yt-dlp. No cookies. Preset providers and `antigravity` are locked to their origins. `compatible` is https plus a public resolved address. Ollama (`host.docker.internal`, `localhost`, `127.0.0.1` with `/v1` or empty path) and local Antigravity bridge URLs (`ANTIGRAVITY_BRIDGE_HTTP_POLICY`) are the only http exceptions. `follow_redirects=False` on every HTTP client. Userinfo rejected. |
 | Prompt injection in the transcript asks the model to print the key | Low | The key is the SDK header, never a prompt field. Worst case is garbage JSON and a heuristic fallback. Completions are not logged. |
 | Malicious media hitting ffmpeg | Medium | ffprobe before transcode. Subprocess timeouts. Container `mem_limit` 4g. No shell. Image stays on Debian ffmpeg from `python:3.11-slim`; do not curl a static build. |
 | Disk fill / job flood | Medium | 8 GiB free check, 3 concurrent, 10/day, 240 min cap, `--max-filesize 8G`, concurrency 1. |
@@ -1583,9 +1626,9 @@ Closer to a typical SPA, and easier for `scripts/smoke.sh`. Rejected as the prim
 
 The processor walks every string in the event, including the formatted exception:
 
-- Replace the value when the key is in `api_key`, `authorization`, `encrypted_key`, `openai_api_key`, `password`, `jwt`, `access_token`, `encryption_key`, `jwt_secret`, `secret`.
-- Replace `sk-[A-Za-z0-9_-]{8,}`, `Bearer [A-Za-z0-9._-]+`, and Fernet tokens (`gAAAA` prefix).
-- Replace any secret registered with `push_secret` (a `ContextVar` of strings whose length is at least 8). Call `push_secret` on the plaintext user key in the keys route and again when the worker decrypts it, and on `OPENAI_API_KEY` when Whisper uses it. This is what catches `gsk_…` and other non-`sk-` tokens inside `exception`.
+- Replace the value when the key is in `api_key`, `authorization`, `encrypted_key`, `openai_api_key`, `password`, `jwt`, `access_token`, `refresh_token`, `id_token`, `antigravity_bridge_token`, `encryption_key`, `jwt_secret`, `secret`.
+- Replace `sk-[A-Za-z0-9_-]{8,}`, `ya29\.[A-Za-z0-9._-]{8,}`, `Bearer [A-Za-z0-9._-]+`, and Fernet tokens (`gAAAA` prefix).
+- Replace any secret registered with `push_secret` / `secret_scope()` (a `ContextVar` of strings whose length is at least 8, isolated per task via `secret_boundary()`). Wrap the plaintext user key in `secret_scope()` in the keys/antigravity-models routes and again when the worker decrypts it, and `OPENAI_API_KEY` when Whisper uses it. This is what catches `gsk_…` and other non-`sk-` tokens inside `exception`.
 
 Set the `openai` and `httpx` loggers to `WARNING` at startup. Apply `redact()` to `jobs.error` and `clips.error` before insert.
 
@@ -1628,10 +1671,10 @@ No Prometheus and no new datastore. structlog JSON to stdout is the telemetry. O
 | `download_done` | `job_id`, `platform`, `duration_s`, `bytes` |
 | `transcribe_done` | `job_id`, `word_count`, `chunks` |
 | `score_chunk` | `job_id`, `index`, `total`, `source` |
-| `score_done` | `job_id`, `windows`, `llm_chunks`, `heuristic_chunks` |
-| `clip_failed` | `job_id`, `clip_index`, `error_code` |
-| `job_finished` | `job_id`, `elapsed_s`, `clips_ready`, `clips_failed` |
-| `job_failed` | `job_id`, `error_code`, `elapsed_s` |
+| `score_done` | `job_id`, `window_count` |
+| `clip_failed` | `job_id`, `clip_index`, `stderr` |
+| `clip_done` | `job_id`, `ready`, `failed` |
+| `job_failed` | `job_id`, `error_code`, `platform`, `elapsed_s` |
 | `cleanup_failed` | `job_id` |
 | `enqueue_failed` | `job_id` |
 | `job_redriven` | `job_id` |
@@ -1773,55 +1816,67 @@ Canary rule for every phase that touches a key: build both canaries by concatena
 
 ## PR Plan
 
-### PR 1 — `feat: add schema, secret checks, and redacting logs`
+### PR 1 — `feat: add schema, secret checks, and redacting logs` (Shipped)
 
 - **Files:** `backend/alembic.ini`, `backend/alembic/env.py`, `backend/alembic/versions/0001_initial.py`, `backend/app/models.py`, `backend/app/schemas.py`, `backend/app/security.py`, `backend/app/logging.py`, `backend/app/errors.py`, `backend/app/db.py`, `backend/app/config.py`, `backend/app/main.py`, `backend/app/workers/celery_app.py`, `backend/tests/conftest.py`, `backend/tests/test_security.py`, `.env.example`, `start.sh`, `start.ps1`, `.github/workflows/ci.yml`.
 - **Depends on:** none.
 - **Description:** Hand-written initial migration for `users`, `api_keys`, `jobs` (including `enqueued_at`), and `clips` including `score_source`, `caption_status`, and `clips.error`. `get_session` commits. Fernet helpers, scrypt `n=2**17`, the ordered HS256 verifier, structlog redaction after `format_exc_info`, and lifespan / `worker_process_init` secret checks plus `engine.dispose(close=False)`. No HTTP routes yet. Both start scripts run `docker compose up -d --wait` and then `alembic upgrade head`, and exit 1 if all 10 tries fail. CI runs `docker compose exec -T api pytest` against `clipforge_test`. Health tests keep passing because conftest sets secrets and the test database URL before import. New settings have defaults (`max_concurrent_jobs=3`, `max_jobs_per_day=10`, `job_timeout_seconds=2700`, `whisper_language=en`, `trust_proxy_count=0`, `min_free_disk_bytes`).
 
-### PR 2 — `feat: add email/password auth that verifies Auth.js JWTs`
+### PR 2 — `feat: add email/password auth that verifies Auth.js JWTs` (Shipped)
 
 - **Files:** `backend/app/api/auth.py`, `backend/app/api/deps.py`, `backend/app/main.py`, `backend/tests/test_auth.py`, `backend/tests/fixtures/jwt_jose.json`, `frontend/auth.ts`, `frontend/app/api/auth/[...nextauth]/route.ts`, `frontend/app/login/page.tsx`, `frontend/app/register/page.tsx`, `frontend/app/providers.tsx`, `frontend/middleware.ts`, `frontend/package.json`, `frontend/app/layout.tsx`, `frontend/app/page.tsx`.
 - **Depends on:** PR 1.
 - **Description:** Register and login on FastAPI. Duplicate register uses the same error as a bad password. Auth.js `jwt` callback stores `token.accessToken` from `SignJWT` (24 hours, HS256) and returns `token`. The committed jose fixture is what Python verifies, plus `alg=none` and the wrong secret. Rightmost-forwarded-for rate limit. Landing header links to sign-in. Middleware gates `/dashboard` and `/jobs` even though those pages are still empty. No key or job UI yet.
 
-### PR 3 — `feat: store one encrypted LLM key per user`
+### PR 3 — `feat: store one encrypted LLM key per user` (Shipped, later refactored in #9)
 
-- **Files:** `backend/app/api/keys.py`, `backend/app/services/providers.py`, `backend/app/main.py`, `backend/tests/test_keys.py`.
+- **Files:** `backend/app/api/keys.py`, `backend/app/services/providers/` (`__init__.py`, `presets.py`, `url_policy.py`, `client.py`, `errors.py`), `backend/app/main.py`, `backend/tests/test_keys.py`, `backend/tests/test_providers.py`.
 - **Depends on:** PR 2.
 - **Description:** `POST/GET/DELETE /api/v1/keys`. Preset origins locked except `ollama` and `compatible`. DNS block list, `follow_redirects=False`, 8s validation call, Fernet upsert, unique `user_id`. Response and logs cannot contain either canary. Ciphertext test is a decrypt roundtrip. The 302-to-metadata test records one connection.
 
-### PR 4 — `feat: ingest a VOD on a Celery job`
+### PR 4 — `feat: ingest a VOD on a Celery job` (Shipped)
 
 - **Files:** `backend/app/services/downloader.py`, `backend/app/services/storage.py`, `backend/app/services/jobs.py`, `backend/app/api/jobs.py`, `backend/app/workers/pipeline.py`, `backend/app/workers/celery_app.py`, `backend/app/main.py`, `backend/requirements.txt`, `docker-compose.yml`, `backend/tests/test_downloader.py`, `backend/tests/test_jobs_api.py`, `backend/tests/test_pipeline.py`.
 - **Depends on:** PR 3.
-- **Description:** `detect_platform` on POST, including trailing slash and `m.twitch.tv`, rejecting `/embed/`. `jobs.platform` is written on insert. Advisory lock around the 3-job and 10/day counts. 202 plus `process_job.delay(job_id)`, then set `enqueued_at`. `GET /api/v1/jobs` and `GET /api/v1/jobs/{id}` return the list and detail shapes with `clips: []` and no `file_path`. Worker probe-then-download, worker-side length, timeout, and sub-only failures. `STUB_AFTER_DOWNLOAD` fails the job with the phase-1 sentence. `cleanup_raw` is a no-op. `begin_attempt` implements terminal check → Redis lock acquire/dead-PID eviction/15s countdown requeue → `attempt += 1` → cap-at-3 `stop` cleanup, with CAS `EXPIRE` refresh and CAS `DEL` release. Celery gains `task_ignore_result`, `visibility_timeout=7200`, `task_routes`, the pipeline import, concurrency 1 (`-Q celery` on `worker`), and `worker_hijack_root_logger=False`. Not the memory caps and not the soft time limit. yt-dlp range `>=2025.1.15,<2027.1.1`. `start_new_session=False` on subprocesses.
+- **Description:** `detect_platform` on POST, including trailing slash and `m.twitch.tv`, rejecting `/embed/`. `jobs.platform` is written on insert. Advisory lock around the 3-job and 10/day counts. 202 plus `process_job.delay(job_id)`, then set `enqueued_at`. `GET /api/v1/jobs` and `GET /api/v1/jobs/{id}` return the list and detail shapes with `clips: []` and no `file_path`. Worker probe-then-download, worker-side length, timeout, and sub-only failures. `cleanup_raw` is a no-op. `begin_attempt` implements terminal check → Redis lock acquire/dead-PID eviction/15s countdown requeue → `attempt += 1` → cap-at-3 `stop` cleanup, with CAS `EXPIRE` refresh and CAS `DEL` release. Celery gains `task_ignore_result`, `visibility_timeout=7200`, `task_routes`, the pipeline import, concurrency 1 (`-Q celery` on `worker`), and `worker_hijack_root_logger=False`. yt-dlp range `>=2025.1.15,<2027.1.1`. `start_new_session=False` on subprocesses.
 
-### PR 5 — `feat: transcribe downloads with Whisper`
+### PR 4b — `feat: allow skipping sign-in in local guest mode` (Shipped, `#5`)
+
+- **Files:** `.env.example`, `README.md`, `backend/app/api/auth.py`, `backend/app/config.py`, `backend/app/schemas.py`, `backend/tests/test_auth.py`, `frontend/auth.ts`, `frontend/auth.config.ts`, `frontend/lib/auth-mode.ts`, `frontend/app/skip-signin-button.tsx`, `frontend/app/login/login-form.tsx`, `frontend/app/register/register-form.tsx`, `frontend/app/page.tsx`.
+- **Depends on:** PR 2.
+- **Description:** Adds `ALLOW_GUEST_AUTH` (`GET /api/v1/auth/config`, `POST /api/v1/auth/guest` provisioning `local@clipforge.local`), Edge-safe `auth.config.ts` with explicit `accessTokenExpiresAt` expiry checks, and the **Skip sign-in** button on the landing/login/register pages when enabled.
+
+### PR 5 — `feat: transcribe downloads with Whisper` (Shipped, `#6`)
 
 - **Files:** `backend/app/services/transcribe.py`, `backend/app/workers/pipeline.py`, `backend/app/workers/celery_app.py`, `backend/tests/test_transcribe.py`, `backend/tests/test_pipeline.py`.
 - **Depends on:** PR 4.
-- **Description:** Remove the download stub. `Transcriber` / `Word`, WAV extract, 10-minute slices, timestamp offset, user-key-first Whisper selection, `whisper-1` only, `transcript.json`, status `transcribing`. Empty `WHISPER_LANGUAGE` omits the hint. Empty speech and missing word timestamps fail the job. `STUB_AFTER_TRANSCRIBE` then fails with `Transcription finished. Later stages are not included in this build yet.` Add `task_soft_time_limit=2700` and `task_time_limit=2760` here, because this is the first PR whose work can run that long.
+- **Description:** Remove the download stub. `Transcriber` / `Word`, WAV extract, 10-minute slices, timestamp offset, user-key-first Whisper selection, `whisper-1` only, `transcript.json`, status `transcribing`. Empty `WHISPER_LANGUAGE` omits the hint. Empty speech and missing word timestamps fail the job. Adds `task_soft_time_limit=2700` and `task_time_limit=2760`.
 
-### PR 6 — `feat: score transcripts into highlight windows`
+### PR 6 — `feat: score transcripts into highlight windows` (Shipped, `#7`)
 
 - **Files:** `backend/app/services/scorer.py`, `backend/app/workers/pipeline.py`, `backend/tests/test_scorer.py`.
 - **Depends on:** PR 5.
-- **Description:** Remove the transcribe stub. 45s/40s chunks, architecture §3.3 prompt left verbatim, user message example `{"highlights":[]}`, bare-list wrap, pydantic `before` truncation and score clamp, one JSON retry, whole-token heuristic, pad-then-suppress, top `MAX_CLIPS_PER_JOB`, dead-air clamp. Persist `windows.json`. Decrypt the user key for scoring here. Whisper decryption stays in the transcribe stage when the stored host is `api.openai.com`. Main thread writes progress. `STUB_AFTER_SCORE` fails with `Scoring finished. Later stages are not included in this build yet.` so the row does not stay in `scoring`.
+- **Description:** Remove the transcribe stub. 45s/40s chunks, architecture §3.3 prompt left verbatim, user message example `{"highlights":[]}`, bare-list wrap, pydantic `before` truncation and score clamp, one JSON retry, whole-token heuristic, pad-then-suppress, top `MAX_CLIPS_PER_JOB`, dead-air clamp. Persist `windows.json`. Decrypt the user key for scoring here. Whisper decryption stays in the transcribe stage when the stored host is `api.openai.com`. Main thread writes progress (`Scoring transcript for highlights` / `Scoring highlights ({done}/{total})`).
 
-### PR 7 — `feat: cut, crop, caption, and stream clips`
+### PR 7 — `feat: cut, crop, caption, and stream clips` (Shipped, `#8`)
 
 - **Files:** `backend/app/services/video.py`, `backend/app/api/clips.py`, `backend/app/workers/pipeline.py`, `backend/Dockerfile`, `backend/tests/test_video.py`, `backend/tests/test_clips_api.py`.
 - **Depends on:** PR 6.
-- **Description:** Remove the score stub. Two-pass ffmpeg, nearest-even crop (`crop=608:1080` on 1920×1080), loudnorm, ASS karaoke with Liberation Sans, per-clip try/except, clip rows. Detail `clips` gain their objects and still omit `file_path` (test lives here as well as the empty-list test in PR 4). `GET /api/v1/clips/{id}/video` with Range and download. Dockerfile installs `fonts-liberation`. One failing clip does not fail the job. `cleanup_raw` stays a no-op.
+- **Description:** Remove the score stub. Two-pass ffmpeg, nearest-even crop (`crop=608:1080` on 1920×1080), loudnorm, ASS karaoke with Liberation Sans, per-clip try/except, clip rows. Detail `clips` gain their objects and still omit `file_path`. `GET /api/v1/clips/{id}/video` with Range and download. Dockerfile installs `fonts-liberation`. One failing clip does not fail the job. `cleanup_raw` stays a no-op until PR 9.
 
-### PR 8 — `feat: add the dashboard, key onboarding, and job detail`
+### PR 7b — `feat: add provider catalog, model discovery, and Antigravity adapter` (`#10`)
 
-- **Files:** `frontend/app/dashboard/page.tsx`, `frontend/app/jobs/[id]/page.tsx`, `frontend/app/api/media/clips/[id]/route.ts`, `frontend/lib/api.ts`, `frontend/lib/jobs.ts`, `frontend/lib/jobs.test.ts`, `frontend/tsconfig.test.json`, `frontend/package.json`, `frontend/app/providers.tsx`, `frontend/app/page.tsx`, `.github/workflows/ci.yml`.
-- **Depends on:** PR 2, PR 3, PR 7.
-- **Description:** TanStack Query polls the list and the detail query every 2.5s while that query's statuses are active, and only after `session.accessToken` is set. Key panel, generate form, Twitch expiry hint, thumbnail on the detail page, clip grid with score, copy, player, download, and literal error text. Same-origin media proxy forwards Range and `Authorization` (using Next.js 15 `await context.params`). `npm test` emits CommonJS and runs `node --test`. CI gains that job. Visual language matches the existing landing tokens.
+- **Files:** `backend/alembic/versions/0002_add_antigravity_provider.py`, `backend/app/api/providers.py`, `backend/app/api/keys.py`, `backend/app/models.py`, `backend/app/schemas.py`, `backend/app/config.py`, `backend/app/logging.py`, `backend/app/main.py`, `backend/app/services/providers/base.py`, `backend/app/services/providers/catalog.py`, `backend/app/services/providers/url_policy.py`, `backend/app/services/providers/antigravity/`, `backend/app/services/scorer.py`, `backend/tests/test_antigravity.py`, `scripts/antigravity_bridge.py`, `start.sh`, `.env.example`.
+- **Depends on:** PR 3, PR 6.
+- **Description:** Adds `CompletionProvider` protocol, `GET /api/v1/providers`, `GET /api/v1/providers/{provider}/models`, `POST /api/v1/providers/antigravity/models`, and the `antigravity` non-OpenAI provider (CLI `agy`, host bridge `scripts/antigravity_bridge.py` auto-started by `start.sh`, and Google CloudCode OAuth). Makes `api_key` optional for `antigravity` and adds `ya29.` / bridge token redaction.
 
-### PR 9 — `feat: clean storage, time out jobs, and document smoke`
+### PR 8 — `feat: add the dashboard, key onboarding, and job detail` (Shipped)
+
+- **Files:** `frontend/app/workspace-header.tsx`, `frontend/app/dashboard/page.tsx`, `frontend/app/dashboard/dashboard-client.tsx`, `frontend/app/jobs/[id]/page.tsx`, `frontend/app/jobs/[id]/job-detail-client.tsx`, `frontend/app/api/media/clips/[id]/route.ts`, `frontend/lib/api.ts`, `frontend/lib/jobs.ts`, `frontend/lib/jobs.test.ts`, `frontend/tsconfig.test.json`, `frontend/tsconfig.json`, `frontend/package.json`, `.github/workflows/ci.yml`.
+- **Depends on:** PR 2, PR 3, PR 7, PR 7b.
+- **Description:** TanStack Query polls the list and the detail query every 2.5s while that query's statuses are active, and only after `session.accessToken` is set. Key panel populated from `GET /api/v1/providers` (supporting optional key for `antigravity`, live model check, and model selection), generate form, Twitch expiry hint, thumbnail on the detail page, clip grid with score, copy, player, download, and literal error text. Same-origin media proxy forwards Range and `Authorization` (using Next.js 15 `await context.params`). `npm test` emits CommonJS and runs `node --test`. CI gains that frontend job. Visual language matches the existing landing tokens.
+
+### PR 9 — `feat: clean storage, time out jobs, and document smoke` (Remaining)
 
 - **Files:** `backend/app/services/storage.py`, `backend/app/workers/pipeline.py`, `backend/app/workers/celery_app.py`, `docker-compose.yml`, `docker-compose.prod.yml`, `scripts/smoke.sh`, `README.md`, `.env.example`, `backend/tests/test_cleanup.py`.
 - **Depends on:** PR 7 and PR 8.

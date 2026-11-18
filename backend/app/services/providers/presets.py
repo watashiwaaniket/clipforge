@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from app.services.providers.base import ResolvedProviderConfig
 from app.services.providers.errors import ProviderConfigError
 from app.services.providers.url_policy import (
     DEFAULT_HTTPS_POLICY,
@@ -16,13 +17,6 @@ class ProviderPreset:
     locked_base_url: bool
     requires_custom_config: bool = False
     url_policy: OutboundUrlPolicy = DEFAULT_HTTPS_POLICY
-
-
-@dataclass(frozen=True)
-class ResolvedProviderConfig:
-    provider: str
-    base_url: str
-    model: str
 
 
 PROVIDER_PRESETS: dict[str, ProviderPreset] = {
@@ -71,6 +65,11 @@ def resolve_provider_config(
     base_url: str | None,
     model: str | None,
 ) -> ResolvedProviderConfig:
+    if provider == "antigravity":
+        from app.services.providers.antigravity import resolve_antigravity_config
+
+        return resolve_antigravity_config(base_url, model)
+
     preset = get_provider_preset(provider)
     if preset is None:
         raise ProviderConfigError("Unsupported provider.")

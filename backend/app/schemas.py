@@ -32,8 +32,8 @@ class AuthConfigResponse(BaseModel):
 class ApiKeyUpsertRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["openai", "groq", "together", "ollama", "compatible"]
-    api_key: SecretStr = Field(min_length=1, max_length=512)
+    provider: Literal["openai", "groq", "together", "ollama", "compatible", "antigravity"]
+    api_key: SecretStr | None = Field(default=None, max_length=4096)
     base_url: str | None = Field(default=None, max_length=512)
     model: str | None = Field(default=None, max_length=200)
 
@@ -49,6 +49,42 @@ class ApiKeyMetadataResponse(BaseModel):
     provider: str | None = None
     model: str | None = None
     base_url: str | None = None
+
+
+class ProviderModelResponse(BaseModel):
+    id: str
+    name: str
+
+
+class ProviderInfoResponse(BaseModel):
+    id: str
+    name: str
+    requires_api_key: bool
+    locked_base_url: bool
+    requires_custom_config: bool
+    default_base_url: str | None = None
+    default_model: str | None = None
+    connected: bool
+    model_source: str
+    models: list[ProviderModelResponse]
+
+
+class ProviderCatalogResponse(BaseModel):
+    providers: list[ProviderInfoResponse]
+
+
+class ProviderModelsResponse(BaseModel):
+    provider: str
+    connected: bool
+    model_source: str
+    default_model: str | None = None
+    models: list[ProviderModelResponse]
+
+
+class AntigravityModelsProbeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: SecretStr | None = Field(default=None, max_length=4096)
 
 
 class JobCreateRequest(BaseModel):

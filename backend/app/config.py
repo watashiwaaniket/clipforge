@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     trust_proxy_count: int = 0
     min_free_disk_bytes: int = 8 * 1024 * 1024 * 1024
     openai_api_key: str = ""
+    antigravity_cli_bin: str = ""
+    antigravity_oauth_creds_path: str = ""
+    antigravity_project_id: str = ""
+    antigravity_bridge_url: str = "http://host.docker.internal:11436"
+    antigravity_bridge_token: str = ""
     cors_origins: str = "http://localhost:3000"
     allow_guest_auth: bool = False
 

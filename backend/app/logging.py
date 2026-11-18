@@ -17,6 +17,9 @@ _SENSITIVE_KEYS = frozenset(
         "password",
         "jwt",
         "access_token",
+        "refresh_token",
+        "id_token",
+        "antigravity_bridge_token",
         "encryption_key",
         "jwt_secret",
         "secret",
@@ -25,6 +28,7 @@ _SENSITIVE_KEYS = frozenset(
 
 _TOKEN_PATTERNS = (
     (re.compile(r"sk-[A-Za-z0-9_-]{8,}"), "[REDACTED]"),
+    (re.compile(r"ya29\.[A-Za-z0-9._-]{8,}"), "[REDACTED]"),
     (re.compile(r"Bearer\s+[A-Za-z0-9._-]+", re.IGNORECASE), "Bearer [REDACTED]"),
     (re.compile(r"gAAAA[A-Za-z0-9_=-]{8,}"), "[REDACTED]"),
 )

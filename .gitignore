@@ -10,6 +10,8 @@ venv/
 backend/.venv/
 node_modules/
 .next/
+dist-test/
+tsconfig.tsbuildinfo
 storage/*
 !storage/.gitkeep
 *.mp4

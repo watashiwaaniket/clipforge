@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db import get_session
-from app.logging import secret_scope
+from app.logging import secret_boundary, secret_scope
 from app.models import ApiKey, User
 from app.schemas import (
     ApiKeyMetadataResponse,
@@ -19,8 +19,13 @@ from app.schemas import (
 )
 from app.security import encrypt_api_key
 from app.services.providers import (
+    ANTIGRAVITY_PROVIDER,
     ProviderConfigError,
+    ResolvedProviderConfig,
+    build_antigravity_provider,
     build_openai_client,
+    is_local_antigravity_sentinel,
+    pick_antigravity_default_model,
     resolve_provider_config,
     strip_url_userinfo,
 )
@@ -38,6 +43,18 @@ def _validate_provider_key(
     model: str,
     plaintext_key: str,
 ) -> None:
+    if provider == ANTIGRAVITY_PROVIDER:
+        antigravity_provider = build_antigravity_provider(
+            credential=plaintext_key,
+            base_url=base_url,
+            model=model,
+            timeout=VALIDATION_TIMEOUT,
+            http_client_factory=httpx.Client,
+        )
+        with antigravity_provider:
+            antigravity_provider.validate_credentials()
+        return
+
     http_client, client = build_openai_client(
         api_key=plaintext_key,
         base_url=base_url,
@@ -61,14 +78,20 @@ def upsert_api_key(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ) -> ApiKeyUpsertResponse:
-    plaintext_key = body.api_key.get_secret_value().strip()
-    if not plaintext_key:
+    raw_key = body.api_key.get_secret_value().strip() if body.api_key is not None else ""
+    if body.provider != ANTIGRAVITY_PROVIDER and not raw_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="API key cannot be empty.",
         )
 
-    with secret_scope(plaintext_key):
+    is_local_antigravity = body.provider == ANTIGRAVITY_PROVIDER and is_local_antigravity_sentinel(
+        raw_key
+    )
+    plaintext_key = "local" if is_local_antigravity else raw_key
+    scope_ctx = secret_boundary() if is_local_antigravity else secret_scope(plaintext_key)
+
+    with scope_ctx:
         try:
             resolved = resolve_provider_config(body.provider, body.base_url, body.model)
         except ProviderConfigError as exc:
@@ -76,6 +99,18 @@ def upsert_api_key(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(exc),
             ) from exc
+
+        if body.provider == ANTIGRAVITY_PROVIDER and (
+            body.model is None or not body.model.strip()
+        ):
+            resolved = ResolvedProviderConfig(
+                provider=resolved.provider,
+                base_url=resolved.base_url,
+                model=pick_antigravity_default_model(
+                    credential=plaintext_key,
+                    http_client_factory=httpx.Client,
+                ),
+            )
 
         try:
             _validate_provider_key(

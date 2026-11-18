@@ -35,6 +35,11 @@ OLLAMA_LOCAL_HTTP_POLICY = OutboundUrlPolicy(
     required_path_suffix="/v1",
     label="Ollama",
 )
+ANTIGRAVITY_BRIDGE_HTTP_POLICY = OutboundUrlPolicy(
+    allow_local_http=True,
+    allowed_local_hosts=OLLAMA_ALLOWED_HOSTS,
+    label="Antigravity bridge",
+)
 
 
 def _is_ip_literal(host: str) -> bool:
