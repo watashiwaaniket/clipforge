@@ -243,11 +243,13 @@ def test_validate_outbound_url_local_http_policy() -> None:
     custom_policy = OutboundUrlPolicy(
         allow_local_http=True,
         allowed_local_hosts=frozenset({"vllm.local"}),
-        required_path_suffix="/v1",
+        required_path_suffix="/v1/",
         label="vLLM",
     )
     with pytest.raises(ProviderConfigError, match="vLLM host is not allowed."):
         validate_outbound_url("http://localhost:8000/v1", policy=custom_policy)
+    with pytest.raises(ProviderConfigError, match="vLLM path must be empty or end in /v1."):
+        validate_outbound_url("http://vllm.local:8000/foov1", policy=custom_policy)
     assert (
         validate_outbound_url("http://vllm.local:8000/v1", policy=custom_policy)
         == "http://vllm.local:8000/v1"
@@ -315,3 +317,16 @@ def test_build_openai_client_validates_ssrf_and_configures_clients(
         assert str(injected_openai.base_url).rstrip("/") == "http://localhost:11434/v1"
     finally:
         injected.close()
+
+    unsafe_client = httpx.Client(follow_redirects=True, timeout=timeout)
+    try:
+        with pytest.raises(ProviderConfigError, match="disable redirects"):
+            build_openai_client(
+                api_key="sk-test",
+                base_url="http://localhost:11434/v1/",
+                provider="ollama",
+                timeout=timeout,
+                http_client=unsafe_client,
+            )
+    finally:
+        unsafe_client.close()

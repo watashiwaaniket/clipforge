@@ -115,14 +115,18 @@ def validate_outbound_url(
         if host not in policy.allowed_local_hosts:
             raise ProviderConfigError(f"{policy.label} host is not allowed.")
         normalized_path = parsed.path.rstrip("/")
-        if (
-            policy.required_path_suffix
-            and normalized_path
-            and not normalized_path.endswith(policy.required_path_suffix)
-        ):
-            raise ProviderConfigError(
-                f"{policy.label} path must be empty or end in {policy.required_path_suffix}."
-            )
+        if policy.required_path_suffix:
+            expected_suffix = policy.required_path_suffix.rstrip("/")
+            if expected_suffix and not expected_suffix.startswith("/"):
+                expected_suffix = f"/{expected_suffix}"
+            if (
+                normalized_path
+                and expected_suffix
+                and not normalized_path.endswith(expected_suffix)
+            ):
+                raise ProviderConfigError(
+                    f"{policy.label} path must be empty or end in {expected_suffix}."
+                )
         return urlunsplit(("http", _format_netloc(host, port), normalized_path, "", ""))
 
     if scheme != "https":

@@ -3,6 +3,7 @@ from collections.abc import Callable
 import httpx
 from openai import OpenAI
 
+from app.services.providers.errors import ProviderConfigError
 from app.services.providers.presets import check_outbound_url
 
 
@@ -16,6 +17,8 @@ def build_openai_client(
     http_client_factory: Callable[..., httpx.Client] = httpx.Client,
 ) -> tuple[httpx.Client, OpenAI]:
     validated_url = check_outbound_url(base_url, provider=provider)
+    if http_client is not None and getattr(http_client, "follow_redirects", False):
+        raise ProviderConfigError("HTTP client must disable redirects.")
     resolved_http_client = http_client or http_client_factory(
         follow_redirects=False, timeout=timeout
     )
