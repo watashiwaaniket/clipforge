@@ -1864,17 +1864,17 @@ Canary rule for every phase that touches a key: build both canaries by concatena
 - **Depends on:** PR 6.
 - **Description:** Remove the score stub. Two-pass ffmpeg, nearest-even crop (`crop=608:1080` on 1920×1080), loudnorm, ASS karaoke with Liberation Sans, per-clip try/except, clip rows. Detail `clips` gain their objects and still omit `file_path`. `GET /api/v1/clips/{id}/video` with Range and download. Dockerfile installs `fonts-liberation`. One failing clip does not fail the job. `cleanup_raw` stays a no-op until PR 9.
 
-### PR 7b — `feat: add provider catalog, model discovery, and Antigravity adapter` (In working tree)
+### PR 7b — `feat: add provider catalog, model discovery, and Antigravity adapter` (`#10`)
 
 - **Files:** `backend/alembic/versions/0002_add_antigravity_provider.py`, `backend/app/api/providers.py`, `backend/app/api/keys.py`, `backend/app/models.py`, `backend/app/schemas.py`, `backend/app/config.py`, `backend/app/logging.py`, `backend/app/main.py`, `backend/app/services/providers/base.py`, `backend/app/services/providers/catalog.py`, `backend/app/services/providers/url_policy.py`, `backend/app/services/providers/antigravity/`, `backend/app/services/scorer.py`, `backend/tests/test_antigravity.py`, `scripts/antigravity_bridge.py`, `start.sh`, `.env.example`.
 - **Depends on:** PR 3, PR 6.
 - **Description:** Adds `CompletionProvider` protocol, `GET /api/v1/providers`, `GET /api/v1/providers/{provider}/models`, `POST /api/v1/providers/antigravity/models`, and the `antigravity` non-OpenAI provider (CLI `agy`, host bridge `scripts/antigravity_bridge.py` auto-started by `start.sh`, and Google CloudCode OAuth). Makes `api_key` optional for `antigravity` and adds `ya29.` / bridge token redaction.
 
-### PR 8 — `feat: add the dashboard, key onboarding, and job detail` (Remaining)
+### PR 8 — `feat: add the dashboard, key onboarding, and job detail` (Shipped)
 
-- **Files:** `frontend/app/dashboard/page.tsx`, `frontend/app/jobs/[id]/page.tsx`, `frontend/app/api/media/clips/[id]/route.ts`, `frontend/lib/api.ts`, `frontend/lib/jobs.ts`, `frontend/lib/jobs.test.ts`, `frontend/tsconfig.test.json`, `frontend/package.json`, `.github/workflows/ci.yml`.
+- **Files:** `frontend/app/workspace-header.tsx`, `frontend/app/dashboard/page.tsx`, `frontend/app/dashboard/dashboard-client.tsx`, `frontend/app/jobs/[id]/page.tsx`, `frontend/app/jobs/[id]/job-detail-client.tsx`, `frontend/app/api/media/clips/[id]/route.ts`, `frontend/lib/api.ts`, `frontend/lib/jobs.ts`, `frontend/lib/jobs.test.ts`, `frontend/tsconfig.test.json`, `frontend/tsconfig.json`, `frontend/package.json`, `.github/workflows/ci.yml`.
 - **Depends on:** PR 2, PR 3, PR 7, PR 7b.
-- **Description:** TanStack Query polls the list and the detail query every 2.5s while that query's statuses are active, and only after `session.accessToken` is set. Key panel populated from `GET /api/v1/providers` (supporting optional key for `antigravity` and model selection), generate form, Twitch expiry hint, thumbnail on the detail page, clip grid with score, copy, player, download, and literal error text. Same-origin media proxy forwards Range and `Authorization` (using Next.js 15 `await context.params`). `npm test` emits CommonJS and runs `node --test`. CI gains that frontend job. Visual language matches the existing landing tokens.
+- **Description:** TanStack Query polls the list and the detail query every 2.5s while that query's statuses are active, and only after `session.accessToken` is set. Key panel populated from `GET /api/v1/providers` (supporting optional key for `antigravity`, live model check, and model selection), generate form, Twitch expiry hint, thumbnail on the detail page, clip grid with score, copy, player, download, and literal error text. Same-origin media proxy forwards Range and `Authorization` (using Next.js 15 `await context.params`). `npm test` emits CommonJS and runs `node --test`. CI gains that frontend job. Visual language matches the existing landing tokens.
 
 ### PR 9 — `feat: clean storage, time out jobs, and document smoke` (Remaining)
 
