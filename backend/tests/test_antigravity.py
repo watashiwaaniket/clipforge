@@ -826,3 +826,165 @@ def test_providers_catalog_endpoints_and_auto_default_key_save(
         "model": "gemini-3.8-flash-medium",
     }
 
+
+def test_bridge_request_timeout_has_headroom_and_local_secrets_are_bounded(
+    client: TestClient,
+    auth_headers: tuple[dict[str, str], UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.logging import _secrets_var
+
+    headers, _user_id = auth_headers
+    _mock_public_dns(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.providers.antigravity.adapter._resolve_cli_binary",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "app.services.providers.antigravity.adapter._resolve_local_oauth_path",
+        lambda: None,
+    )
+    monkeypatch.setattr(settings, "antigravity_bridge_url", "http://host.docker.internal:11436")
+    monkeypatch.setattr(settings, "antigravity_bridge_token", "bridge-secret-token-xyz")
+
+    seen_timeouts: list[object] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"ok": True})
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={"models": [{"id": "gemini-4-hydrogen", "name": "Gemini 4 Hydrogen"}]},
+            )
+        if request.url.path == "/v1/complete":
+            seen_timeouts.append(request.extensions.get("timeout"))
+            return httpx.Response(
+                200,
+                json={
+                    "status": "SUCCESS",
+                    "response": "pong",
+                    "structured_output": {"highlights": []},
+                },
+            )
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": []})
+        raise AssertionError(f"Unexpected URL: {request.url}")
+
+    _mock_httpx_client(monkeypatch, handler)
+
+    with build_antigravity_provider(
+        credential="local",
+        model="gemini-4-hydrogen",
+        timeout=httpx.Timeout(8.0, connect=5.0),
+    ) as provider:
+        provider.validate_credentials()
+        assert seen_timeouts[-1] == {
+            "connect": 5.0,
+            "read": 17.0,
+            "write": 17.0,
+            "pool": 17.0,
+        }
+
+    # Ensure secret_boundary prevents local-mode bridge/OAuth push_secret from leaking on thread
+    before = _secrets_var.get()
+    assert client.get("/api/v1/providers", headers=headers).status_code == 200
+    assert _secrets_var.get() == before
+    assert (
+        client.post(
+            "/api/v1/providers/antigravity/models",
+            headers=headers,
+            json={"api_key": "local"},
+        ).status_code
+        == 200
+    )
+    assert _secrets_var.get() == before
+    assert (
+        client.post("/api/v1/keys", headers=headers, json={"provider": "antigravity"}).status_code
+        == 200
+    )
+    assert _secrets_var.get() == before
+
+    monkeypatch.setattr("app.services.scorer.MIN_WORDS", 1)
+    words = _make_words(["hello", "world", "test"])
+    score_transcript(
+        words,
+        duration_s=10.0,
+        api_key="local",
+        base_url="https://daily-cloudcode-pa.googleapis.com",
+        model="gemini-4-hydrogen",
+        provider="antigravity",
+    )
+    assert _secrets_var.get() == before
+
+
+def test_keys_rejects_base_url_before_probing_antigravity_models(
+    client: TestClient,
+    auth_headers: tuple[dict[str, str], UUID],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers, _user_id = auth_headers
+
+    def fail_if_called(**_kwargs) -> str:
+        raise AssertionError("pick_antigravity_default_model should not run on invalid base_url")
+
+    monkeypatch.setattr("app.api.keys.pick_antigravity_default_model", fail_if_called)
+
+    res = client.post(
+        "/api/v1/keys",
+        headers=headers,
+        json={"provider": "antigravity", "base_url": "https://evil.example.com"},
+    )
+    assert res.status_code == 400
+    assert res.json() == {"detail": "That provider uses a fixed base URL."}
+
+
+def test_oauth_refresh_invalid_json_and_short_discovery_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_public_dns(monkeypatch)
+    seen_client_timeouts: list[object] = []
+
+    class CapturingClient(_REAL_HTTPX_CLIENT):
+        def __init__(self, *args, **kwargs):
+            seen_client_timeouts.append(kwargs.get("timeout"))
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://oauth2.googleapis.com/token":
+            return httpx.Response(200, text="not-json")
+        if str(request.url).endswith("/v1internal:loadCodeAssist"):
+            return httpx.Response(200, json={"cloudaicompanionProject": "proj-1"})
+        if str(request.url).endswith("/v1internal:fetchAvailableModels"):
+            return httpx.Response(
+                200,
+                json={"models": {"gemini-4-hydrogen": {"displayName": "Gemini 4 Hydrogen"}}},
+            )
+        raise AssertionError(f"Unexpected URL: {request.url}")
+
+    monkeypatch.setattr(
+        "app.services.providers.antigravity.adapter.httpx.Client", CapturingClient
+    )
+
+    # Short discovery timeout is passed to build_antigravity_provider in list_antigravity_models
+    models, source, connected = list_antigravity_models(credential=_ya29_canary())
+    assert connected is True
+    assert source == "oauth_live"
+    assert [m.id for m in models] == ["gemini-4-hydrogen"]
+    assert seen_client_timeouts == [httpx.Timeout(5.0, connect=2.0)]
+
+    # Non-JSON token refresh payload raises ProviderConfigError cleanly
+    expired_creds = json.dumps(
+        {
+            "access_token": _ya29_canary(),
+            "refresh_token": _refresh_canary(),
+            "client_id": "client-123",
+            "expiry_date": (time.time() - 300) * 1000,
+        }
+    )
+    with build_antigravity_provider(credential=expired_creds) as provider:
+        with pytest.raises(ProviderConfigError, match="invalid response"):
+            provider.validate_credentials()
+
+

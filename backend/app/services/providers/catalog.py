@@ -5,8 +5,8 @@ import httpx
 
 from app.services.providers.antigravity import (
     ANTIGRAVITY_DEFAULT_BASE_URL,
-    ANTIGRAVITY_DEFAULT_MODEL,
     ANTIGRAVITY_PROVIDER,
+    choose_antigravity_default_model,
     list_antigravity_models,
 )
 from app.services.providers.base import ProviderModelInfo
@@ -112,25 +112,6 @@ def _probe_ollama_models(
     return list(_STATIC_PROVIDER_MODELS["ollama"]), "static", False
 
 
-def _choose_antigravity_default(models: list[ProviderModelInfo], connected: bool) -> str:
-    if not connected or not models:
-        return ANTIGRAVITY_DEFAULT_MODEL
-    ids = [m.id for m in models]
-    if ANTIGRAVITY_DEFAULT_MODEL in ids:
-        return ANTIGRAVITY_DEFAULT_MODEL
-    for preferred in (
-        "gemini-3.8-flash-medium",
-        "gemini-3.8-flash-high",
-        "gemini-3.8-flash-low",
-    ):
-        if preferred in ids:
-            return preferred
-    for model_id in ids:
-        if model_id.startswith("gemini-"):
-            return model_id
-    return ids[0]
-
-
 def get_provider_catalog_entry(
     provider: str,
     *,
@@ -144,7 +125,7 @@ def get_provider_catalog_entry(
             credential=credential,
             http_client_factory=factory,
         )
-        default_model = _choose_antigravity_default(models, connected)
+        default_model = choose_antigravity_default_model(models, connected)
         return ProviderCatalogEntry(
             id=ANTIGRAVITY_PROVIDER,
             name=_PROVIDER_DISPLAY_NAMES[ANTIGRAVITY_PROVIDER],

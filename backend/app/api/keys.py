@@ -1,4 +1,3 @@
-from contextlib import nullcontext
 from uuid import uuid4
 
 import httpx
@@ -11,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db import get_session
-from app.logging import secret_scope
+from app.logging import secret_boundary, secret_scope
 from app.models import ApiKey, User
 from app.schemas import (
     ApiKeyMetadataResponse,
@@ -22,6 +21,7 @@ from app.security import encrypt_api_key
 from app.services.providers import (
     ANTIGRAVITY_PROVIDER,
     ProviderConfigError,
+    ResolvedProviderConfig,
     build_antigravity_provider,
     build_openai_client,
     is_local_antigravity_sentinel,
@@ -89,25 +89,28 @@ def upsert_api_key(
         raw_key
     )
     plaintext_key = "local" if is_local_antigravity else raw_key
-    scope_ctx = nullcontext() if is_local_antigravity else secret_scope(plaintext_key)
+    scope_ctx = secret_boundary() if is_local_antigravity else secret_scope(plaintext_key)
 
     with scope_ctx:
-        requested_model = body.model
-        if body.provider == ANTIGRAVITY_PROVIDER and (
-            requested_model is None or not requested_model.strip()
-        ):
-            requested_model = pick_antigravity_default_model(
-                credential=plaintext_key,
-                http_client_factory=httpx.Client,
-            )
-
         try:
-            resolved = resolve_provider_config(body.provider, body.base_url, requested_model)
+            resolved = resolve_provider_config(body.provider, body.base_url, body.model)
         except ProviderConfigError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(exc),
             ) from exc
+
+        if body.provider == ANTIGRAVITY_PROVIDER and (
+            body.model is None or not body.model.strip()
+        ):
+            resolved = ResolvedProviderConfig(
+                provider=resolved.provider,
+                base_url=resolved.base_url,
+                model=pick_antigravity_default_model(
+                    credential=plaintext_key,
+                    http_client_factory=httpx.Client,
+                ),
+            )
 
         try:
             _validate_provider_key(

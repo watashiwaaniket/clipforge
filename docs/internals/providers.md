@@ -24,7 +24,7 @@ Because users can supply custom `base_url` values for `ollama` and `compatible`,
 - **No redirects**: Every `httpx.Client` sets `follow_redirects=False` so a `301`/`302` cannot pivot from a public domain to cloud metadata (`169.254.169.254`).
 - **Standard HTTPS policy (`DEFAULT_HTTPS_POLICY`)**: Requires `https`, rejects IP literals and metadata/local hostnames, resolves all A/AAAA records via `socket.getaddrinfo`, and fails if *any* returned IP (including IPv4-mapped IPv6 addresses) is loopback, private, link-local, unspecified, `0.0.0.0/8`, ULA, or multicast.
 - **Local HTTP policy (`OLLAMA_LOCAL_HTTP_POLICY`)**: Allows `http` strictly for `host.docker.internal`, `localhost`, or `127.0.0.1` with an empty path or one ending in `/v1`.
-- **Antigravity bridge policy (`ANTIGRAVITY_BRIDGE_HTTP_POLICY`)**: Allows `http` strictly for `host.docker.internal`, `localhost`, or `127.0.0.1` at the root path (non-local bridge URLs must use `https` under `DEFAULT_HTTPS_POLICY`).
+- **Antigravity bridge policy (`ANTIGRAVITY_BRIDGE_HTTP_POLICY`)**: Allows `http` strictly for `host.docker.internal`, `localhost`, or `127.0.0.1` (non-local bridge URLs must use `https` under `DEFAULT_HTTPS_POLICY`).
 
 ## Scoring vs. Transcription Key Precedence
 

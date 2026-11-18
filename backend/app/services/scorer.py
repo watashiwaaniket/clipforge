@@ -4,7 +4,6 @@ import string
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import nullcontext
 from contextvars import copy_context
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -25,7 +24,7 @@ from pydantic import (
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.errors import ClipForgeError
-from app.logging import secret_scope
+from app.logging import secret_boundary, secret_scope
 from app.services.providers import (
     ANTIGRAVITY_PROVIDER,
     AntigravityProvider,
@@ -560,7 +559,7 @@ def score_transcript(
         return []
 
     skip_scope = provider == ANTIGRAVITY_PROVIDER and is_local_antigravity_sentinel(api_key)
-    scope_ctx = nullcontext() if skip_scope else secret_scope(api_key)
+    scope_ctx = secret_boundary() if skip_scope else secret_scope(api_key)
     with scope_ctx:
         closable: Any = None
         if client_factory is not None:

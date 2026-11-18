@@ -1,10 +1,8 @@
-from contextlib import nullcontext
-
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.api.deps import get_current_user
-from app.logging import secret_scope
+from app.logging import secret_boundary, secret_scope
 from app.models import User
 from app.schemas import (
     AntigravityModelsProbeRequest,
@@ -56,7 +54,8 @@ def _to_models_response(entry: ProviderCatalogEntry) -> ProviderModelsResponse:
 def list_providers(
     _user: User = Depends(get_current_user),
 ) -> ProviderCatalogResponse:
-    entries = list_provider_catalog(http_client_factory=httpx.Client)
+    with secret_boundary():
+        entries = list_provider_catalog(http_client_factory=httpx.Client)
     return ProviderCatalogResponse(providers=[_to_provider_info(entry) for entry in entries])
 
 
@@ -66,7 +65,8 @@ def get_provider_models(
     _user: User = Depends(get_current_user),
 ) -> ProviderModelsResponse:
     try:
-        entry = get_provider_catalog_entry(provider, http_client_factory=httpx.Client)
+        with secret_boundary():
+            entry = get_provider_catalog_entry(provider, http_client_factory=httpx.Client)
     except ProviderConfigError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -83,7 +83,7 @@ def probe_antigravity_models(
     raw = body.api_key.get_secret_value().strip() if body.api_key is not None else ""
     is_local = is_local_antigravity_sentinel(raw)
     credential = "local" if is_local else raw
-    scope_ctx = nullcontext() if is_local else secret_scope(credential)
+    scope_ctx = secret_boundary() if is_local else secret_scope(credential)
     with scope_ctx:
         entry = get_provider_catalog_entry(
             ANTIGRAVITY_PROVIDER,

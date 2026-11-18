@@ -450,7 +450,16 @@ class AntigravityProvider:
                         "Antigravity OAuth token refresh was rejected. Re-authenticate and retry."
                     )
 
-                token_data = resp.json()
+                try:
+                    token_data = resp.json()
+                except ValueError as exc:
+                    raise ProviderConfigError(
+                        "Antigravity OAuth refresh returned an invalid response."
+                    ) from exc
+                if not isinstance(token_data, dict):
+                    raise ProviderConfigError(
+                        "Antigravity OAuth refresh returned an unexpected response."
+                    )
                 new_token = _clean_optional_str(token_data.get("access_token"))
                 if not new_token:
                     raise ProviderConfigError("Antigravity OAuth refresh did not return a token.")
@@ -488,7 +497,7 @@ class AntigravityProvider:
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    proj = data.get("cloudaicompanionProject")
+                    proj = data.get("cloudaicompanionProject") if isinstance(data, dict) else None
                     if isinstance(proj, str) and proj.strip():
                         self._oauth.project_id = proj.strip()
                         return self._oauth.project_id
@@ -709,11 +718,19 @@ class AntigravityProvider:
         if json_schema is not None:
             body["json_schema"] = json_schema
 
+        connect_timeout = (
+            self._timeout.connect
+            if isinstance(self._timeout, httpx.Timeout) and self._timeout.connect is not None
+            else 5.0
+        )
+        request_timeout = httpx.Timeout(timeout_s + 2.0, connect=connect_timeout)
+
         try:
             resp = self._http_client.post(
                 f"{self._bridge_url}/v1/complete",
                 headers=_bridge_headers(),
                 json=body,
+                timeout=request_timeout,
             )
         except httpx.TimeoutException as exc:
             raise AntigravityApiError(
@@ -905,6 +922,9 @@ def build_antigravity_provider(
     )
 
 
+MODEL_DISCOVERY_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
+
+
 def list_antigravity_models(
     *,
     credential: str | None = None,
@@ -920,6 +940,7 @@ def list_antigravity_models(
             with build_antigravity_provider(
                 credential=credential,
                 base_url=base_url,
+                timeout=MODEL_DISCOVERY_TIMEOUT,
                 http_client_factory=client_factory,
                 cli_runner=runner,
             ) as provider:
@@ -955,7 +976,7 @@ def list_antigravity_models(
     if bridge_url is not None:
         try:
             with client_factory(
-                follow_redirects=False, timeout=httpx.Timeout(5.0, connect=2.0)
+                follow_redirects=False, timeout=MODEL_DISCOVERY_TIMEOUT
             ) as client:
                 resp = client.get(f"{bridge_url}/v1/models", headers=_bridge_headers())
                 if resp.status_code == 200:
@@ -985,6 +1006,7 @@ def list_antigravity_models(
             with build_antigravity_provider(
                 credential=raw_json,
                 base_url=base_url,
+                timeout=MODEL_DISCOVERY_TIMEOUT,
                 http_client_factory=client_factory,
                 cli_runner=runner,
             ) as provider:
@@ -997,17 +1019,10 @@ def list_antigravity_models(
     return list(FALLBACK_ANTIGRAVITY_MODELS), "fallback", False
 
 
-def pick_antigravity_default_model(
-    *,
-    credential: str | None = None,
-    http_client_factory: Callable[..., httpx.Client] | None = None,
-    cli_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+def choose_antigravity_default_model(
+    models: list[ProviderModelInfo],
+    connected: bool,
 ) -> str:
-    models, _source, connected = list_antigravity_models(
-        credential=credential,
-        http_client_factory=http_client_factory,
-        cli_runner=cli_runner,
-    )
     if not connected or not models:
         return ANTIGRAVITY_DEFAULT_MODEL
     ids = [m.id for m in models]
@@ -1024,3 +1039,17 @@ def pick_antigravity_default_model(
         if model_id.startswith("gemini-"):
             return model_id
     return ids[0]
+
+
+def pick_antigravity_default_model(
+    *,
+    credential: str | None = None,
+    http_client_factory: Callable[..., httpx.Client] | None = None,
+    cli_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> str:
+    models, _source, connected = list_antigravity_models(
+        credential=credential,
+        http_client_factory=http_client_factory,
+        cli_runner=cli_runner,
+    )
+    return choose_antigravity_default_model(models, connected)
