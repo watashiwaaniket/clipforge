@@ -1,0 +1,15 @@
+services:
+  api:
+    volumes: !override
+      - ./storage:/storage
+    ports: !override
+      - "127.0.0.1:8000:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+  worker:
+    volumes: !override
+      - ./storage:/storage
+    mem_limit: 4g
+    memswap_limit: 4g
+  beat:
+    volumes: !override
+      - ./storage:/storage
