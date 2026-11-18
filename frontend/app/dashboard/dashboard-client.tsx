@@ -203,8 +203,11 @@ export function DashboardClient() {
       setSelectedModel(CUSTOM_MODEL_SENTINEL);
       return;
     }
+    if (selectedModel === CUSTOM_MODEL_SENTINEL) {
+      return;
+    }
     const candidate = effectiveDefaultModel ?? activeModels[0]?.id ?? "";
-    if (!selectedModel || selectedModel === CUSTOM_MODEL_SENTINEL) {
+    if (!selectedModel) {
       setSelectedModel(candidate);
     } else if (
       activeModels.length > 0 &&
@@ -407,6 +410,15 @@ export function DashboardClient() {
                   </div>
                 ) : null}
               </div>
+
+              {keyQuery.isError ? (
+                <p
+                  role="alert"
+                  className="mt-5 rounded-xl bg-[#ff5d4a]/15 px-3.5 py-2.5 text-sm text-[#ffb4ab] outline outline-1 outline-[#ff5d4a]/30"
+                >
+                  {errorDetail(keyQuery.error, "Could not load API key status.")}
+                </p>
+              ) : null}
 
               {keyConfigured && !editingKey && keyQuery.data ? (
                 <dl className="mt-5 grid gap-4 rounded-2xl bg-bg p-4 outline outline-1 outline-white/10 sm:grid-cols-3">
