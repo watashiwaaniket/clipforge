@@ -3,54 +3,10 @@ import socket
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
+from app.services.providers.errors import ProviderConfigError
 
-class ProviderConfigError(ValueError):
-    pass
+OLLAMA_ALLOWED_HOSTS = frozenset({"host.docker.internal", "localhost", "127.0.0.1"})
 
-
-@dataclass(frozen=True)
-class ProviderPreset:
-    default_base_url: str | None
-    default_model: str | None
-    locked_base_url: bool
-
-
-@dataclass(frozen=True)
-class ResolvedProviderConfig:
-    provider: str
-    base_url: str
-    model: str
-
-
-PROVIDER_PRESETS: dict[str, ProviderPreset] = {
-    "openai": ProviderPreset(
-        default_base_url="https://api.openai.com/v1",
-        default_model="gpt-4o-mini",
-        locked_base_url=True,
-    ),
-    "groq": ProviderPreset(
-        default_base_url="https://api.groq.com/openai/v1",
-        default_model="llama-3.3-70b-versatile",
-        locked_base_url=True,
-    ),
-    "together": ProviderPreset(
-        default_base_url="https://api.together.xyz/v1",
-        default_model="meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
-        locked_base_url=True,
-    ),
-    "ollama": ProviderPreset(
-        default_base_url="http://host.docker.internal:11434/v1",
-        default_model="llama3.1",
-        locked_base_url=False,
-    ),
-    "compatible": ProviderPreset(
-        default_base_url=None,
-        default_model=None,
-        locked_base_url=False,
-    ),
-}
-
-_OLLAMA_ALLOWED_HOSTS = frozenset({"host.docker.internal", "localhost", "127.0.0.1"})
 _BLOCKED_HOSTNAMES = frozenset(
     {
         "host.docker.internal",
@@ -62,6 +18,23 @@ _BLOCKED_HOSTNAMES = frozenset(
 _IPV4_ZERO_NET = ipaddress.ip_network("0.0.0.0/8")
 _IPV6_ULA_NET = ipaddress.ip_network("fc00::/7")
 _IPV6_LINK_LOCAL_NET = ipaddress.ip_network("fe80::/10")
+
+
+@dataclass(frozen=True)
+class OutboundUrlPolicy:
+    allow_local_http: bool = False
+    allowed_local_hosts: frozenset[str] = frozenset()
+    required_path_suffix: str | None = None
+    label: str = "Local"
+
+
+DEFAULT_HTTPS_POLICY = OutboundUrlPolicy()
+OLLAMA_LOCAL_HTTP_POLICY = OutboundUrlPolicy(
+    allow_local_http=True,
+    allowed_local_hosts=OLLAMA_ALLOWED_HOSTS,
+    required_path_suffix="/v1",
+    label="Ollama",
+)
 
 
 def _is_ip_literal(host: str) -> bool:
@@ -108,7 +81,11 @@ def strip_url_userinfo(url: str) -> str:
     return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
 
 
-def check_outbound_url(base_url: str, *, provider: str = "compatible") -> str:
+def validate_outbound_url(
+    base_url: str,
+    *,
+    policy: OutboundUrlPolicy = DEFAULT_HTTPS_POLICY,
+) -> str:
     url = base_url.strip()
     if not url:
         raise ProviderConfigError("Base URL cannot be empty.")
@@ -132,14 +109,24 @@ def check_outbound_url(base_url: str, *, provider: str = "compatible") -> str:
     if not host:
         raise ProviderConfigError("Base URL must include a host.")
 
-    if provider == "ollama":
+    if policy.allow_local_http:
         if scheme != "http":
-            raise ProviderConfigError("Ollama base URL must use http.")
-        if host not in _OLLAMA_ALLOWED_HOSTS:
-            raise ProviderConfigError("Ollama host is not allowed.")
+            raise ProviderConfigError(f"{policy.label} base URL must use http.")
+        if host not in policy.allowed_local_hosts:
+            raise ProviderConfigError(f"{policy.label} host is not allowed.")
         normalized_path = parsed.path.rstrip("/")
-        if normalized_path and not normalized_path.endswith("/v1"):
-            raise ProviderConfigError("Ollama path must be empty or end in /v1.")
+        if policy.required_path_suffix:
+            expected_suffix = policy.required_path_suffix.rstrip("/")
+            if expected_suffix and not expected_suffix.startswith("/"):
+                expected_suffix = f"/{expected_suffix}"
+            if (
+                normalized_path
+                and expected_suffix
+                and not normalized_path.endswith(expected_suffix)
+            ):
+                raise ProviderConfigError(
+                    f"{policy.label} path must be empty or end in {expected_suffix}."
+                )
         return urlunsplit(("http", _format_netloc(host, port), normalized_path, "", ""))
 
     if scheme != "https":
@@ -174,40 +161,3 @@ def check_outbound_url(base_url: str, *, provider: str = "compatible") -> str:
 
     normalized_path = parsed.path.rstrip("/")
     return urlunsplit(("https", _format_netloc(host, port), normalized_path, "", ""))
-
-
-def resolve_provider_config(
-    provider: str,
-    base_url: str | None,
-    model: str | None,
-) -> ResolvedProviderConfig:
-    preset = PROVIDER_PRESETS.get(provider)
-    if preset is None:
-        raise ProviderConfigError("Unsupported provider.")
-
-    clean_base_url = base_url.strip() if base_url is not None else None
-    if clean_base_url == "":
-        clean_base_url = None
-
-    clean_model = model.strip() if model is not None else None
-    if clean_model == "":
-        clean_model = None
-
-    if preset.locked_base_url and clean_base_url is not None:
-        raise ProviderConfigError("That provider uses a fixed base URL.")
-
-    if provider == "compatible" and (clean_base_url is None or clean_model is None):
-        raise ProviderConfigError('Provider "compatible" needs a base URL and a model.')
-
-    resolved_base_url = clean_base_url if clean_base_url is not None else preset.default_base_url
-    resolved_model = clean_model if clean_model is not None else preset.default_model
-
-    if not resolved_base_url or not resolved_model:
-        raise ProviderConfigError("Provider base URL and model are required.")
-
-    validated_url = check_outbound_url(resolved_base_url, provider=provider)
-    return ResolvedProviderConfig(
-        provider=provider,
-        base_url=validated_url,
-        model=resolved_model,
-    )

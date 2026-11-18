@@ -1127,7 +1127,7 @@ Landing page (`frontend/app/page.tsx`) keeps its layout. Header gains a link: `S
 | `ollama` | `http://host.docker.internal:11434/v1` | `llama3.1` |
 | `compatible` | required | required |
 
-The model table will go stale. It lives in `backend/app/services/providers.py` as data, not as scattered strings, so one PR can update it. `model` on the request overrides the preset model. `base_url` overrides the preset only for `ollama` and `compatible`. `openai`, `groq`, and `together` are locked to the preset origin; a client-supplied `base_url` for those three is 400 `That provider uses a fixed base URL.` `compatible` without both `base_url` and `model` is 400 `Provider "compatible" needs a base URL and a model.`
+The model table will go stale. It lives in `backend/app/services/providers/presets.py` as data, not as scattered strings, so one PR can update it. `model` on the request overrides the preset model. `base_url` overrides the preset only for `ollama` and `compatible`. `openai`, `groq`, and `together` are locked to the preset origin; a client-supplied `base_url` for those three is 400 `That provider uses a fixed base URL.` `compatible` without both `base_url` and `model` is 400 `Provider "compatible" needs a base URL and a model.`
 
 `check_outbound_url` runs in the API process before the validation call and again in the worker before scoring:
 
@@ -1726,14 +1726,14 @@ There is no feature flag. Each `STUB_AFTER_*` constant is deleted by the next PR
 | Worker OOM on a long encode | Medium | 4g limit, concurrency 1, threads 2, attempt cap, late ack. |
 | Duplicate clip rows after retry | Medium | Clipping deletes prior rows and files for that job before re-export. Terminal deliveries no-op. |
 | `FileResponse` Range behavior differs across Starlette | Low | One test for 206. Fallback range reader is specified if it fails. |
-| Provider default model names go stale | Medium | Single table in `providers.py`. Validation call fails closed with a clear 400. |
+| Provider default model names go stale | Medium | Single table in `services/providers/presets.py`. Validation call fails closed with a clear 400. |
 | Operator ships without `OPENAI_API_KEY` and users only have Groq keys | Medium | Job fails at transcribe with the explicit sentence. README says Whisper is OpenAI. |
 
 ---
 
 ## Open Questions
 
-1. **Default chat models** for Groq and Together will rot. The table in `providers.py` is a starting point for 2026-11 and was not verified against those vendors on this date. Replace the strings when a provider 404s a model; do not add a model browser UI. Who pays for Whisper is not open: the user OpenAI key wins, and `OPENAI_API_KEY` is only the fallback (Key Decision 3).
+1. **Default chat models** for Groq and Together will rot. The table in `services/providers/presets.py` is a starting point for 2026-11 and was not verified against those vendors on this date. Replace the strings when a provider 404s a model; do not add a model browser UI. Who pays for Whisper is not open: the user OpenAI key wins, and `OPENAI_API_KEY` is only the fallback (Key Decision 3).
 
 2. **Ollama from the compose network.** `host.docker.internal` works on Docker Desktop. On a Linux VPS it needs `extra_hosts: ["host.docker.internal:host-gateway"]` on `api` and `worker`, and Ollama listening on the host. Not added by default because most MVP users will use a hosted key. Add the `extra_hosts` line when the first Ollama user needs it. Do not build an Ollama-in-compose service (that is a new moving part).
 

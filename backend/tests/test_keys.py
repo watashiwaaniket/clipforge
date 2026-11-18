@@ -73,7 +73,7 @@ def _mock_public_dns(monkeypatch: pytest.MonkeyPatch, ip: str = "93.184.216.34")
         af = socket.AF_INET6 if ":" in ip else socket.AF_INET
         return [(af, socket.SOCK_STREAM, 6, "", (ip, int(port or 443)))]
 
-    monkeypatch.setattr("app.services.providers.socket.getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr("app.services.providers.url_policy.socket.getaddrinfo", fake_getaddrinfo)
 
 
 def _mock_httpx_client(

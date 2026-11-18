@@ -70,7 +70,11 @@ clipforge/
 ├── docker-compose.yml        # api, worker, db, redis (dev + prod same file)
 ├── .env.example              # every env var, documented
 ├── docs/
-│   └── ARCHITECTURE.md       # system design — read before backend work
+│   ├── README.md             # documentation index
+│   ├── ARCHITECTURE.md       # system blueprint — read before backend work
+│   ├── DESIGN.md             # MVP phases 1–6 design contract
+│   ├── internals/            # architectural decisions, provider design, pipeline invariants
+│   └── user/                 # user-facing guides
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -85,6 +89,7 @@ clipforge/
 │   │   │   ├── celery_app.py
 │   │   │   └── pipeline.py   # THE core: download → transcribe → score → clip
 │   │   ├── services/
+│   │   │   ├── providers/    # presets, SSRF url_policy, OpenAI client builder, errors
 │   │   │   ├── downloader.py # yt-dlp wrapper
 │   │   │   ├── transcribe.py # Whisper API behind `Transcriber` interface
 │   │   │   ├── scorer.py     # LLM highlight scoring + prompt + JSON schema
@@ -226,6 +231,7 @@ All endpoints except `/health` require Bearer JWT. Errors: `{"detail": "human-re
 - Python: type hints everywhere, `pydantic` for validation, `ruff` for lint/format, `structlog` for logging (JSON). No `print()`.
 - TypeScript: strict mode, no `any` unless unavoidable.
 - Commits: conventional commits (`feat:`, `fix:`, `chore:`).
+- Pull requests: always use a squash commit when merging PRs (e.g., `gh pr merge --squash`) with a conventional commit title/message.
 - Every service function takes explicit inputs, returns typed outputs, raises domain exceptions — no silent Nones.
 - ffmpeg called via `subprocess.run([...], check=True, capture_output=True)` with parsed errors.
 - All external calls (yt-dlp, OpenAI, ffmpeg) wrapped with tenacity retries (max 2, exponential backoff) where retryable.

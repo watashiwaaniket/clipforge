@@ -3,7 +3,6 @@ from uuid import uuid4
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from openai import OpenAI
 from openai.types.chat import ChatCompletion
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -21,7 +20,7 @@ from app.schemas import (
 from app.security import encrypt_api_key
 from app.services.providers import (
     ProviderConfigError,
-    check_outbound_url,
+    build_openai_client,
     resolve_provider_config,
     strip_url_userinfo,
 )
@@ -39,14 +38,14 @@ def _validate_provider_key(
     model: str,
     plaintext_key: str,
 ) -> None:
-    check_outbound_url(base_url, provider=provider)
-    with httpx.Client(follow_redirects=False, timeout=VALIDATION_TIMEOUT) as http_client:
-        client = OpenAI(
-            api_key=plaintext_key,
-            base_url=base_url,
-            http_client=http_client,
-            max_retries=0,
-        )
+    http_client, client = build_openai_client(
+        api_key=plaintext_key,
+        base_url=base_url,
+        provider=provider,
+        timeout=VALIDATION_TIMEOUT,
+        http_client_factory=httpx.Client,
+    )
+    with http_client:
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": "ping"}],
