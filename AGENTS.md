@@ -231,6 +231,7 @@ All endpoints except `/health` require Bearer JWT. Errors: `{"detail": "human-re
 - Python: type hints everywhere, `pydantic` for validation, `ruff` for lint/format, `structlog` for logging (JSON). No `print()`.
 - TypeScript: strict mode, no `any` unless unavoidable.
 - Commits: conventional commits (`feat:`, `fix:`, `chore:`).
+- Pull requests: always use a squash commit when merging PRs (e.g., `gh pr merge --squash`) with a conventional commit title/message.
 - Every service function takes explicit inputs, returns typed outputs, raises domain exceptions — no silent Nones.
 - ffmpeg called via `subprocess.run([...], check=True, capture_output=True)` with parsed errors.
 - All external calls (yt-dlp, OpenAI, ffmpeg) wrapped with tenacity retries (max 2, exponential backoff) where retryable.
