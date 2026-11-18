@@ -67,10 +67,12 @@ clipforge/
 ├── README.md                 # human quickstart
 ├── start.sh                  # one-command local boot (unix)
 ├── start.ps1                 # one-command local boot (windows)
-├── docker-compose.yml        # api, worker, db, redis (dev + prod same file)
+├── docker-compose.yml        # api, worker, beat, db, redis
+├── docker-compose.prod.yml   # production compose override (no source mount, 4g worker mem_limit)
 ├── .env.example              # every env var, documented
 ├── scripts/
-│   └── antigravity_bridge.py # optional host bridge for local agy CLI sessions
+│   ├── antigravity_bridge.py # optional host bridge for local agy CLI sessions
+│   └── smoke.sh              # operator end-to-end smoke script (URL -> ready clip)
 ├── docs/
 │   ├── README.md             # documentation index
 │   ├── ARCHITECTURE.md       # system blueprint — read before backend work
@@ -261,9 +263,9 @@ All endpoints except `/health` and `/auth/*` require Bearer JWT. Errors: `{"deta
 - [x] Failed states surfaced with the actual error message
 
 **Phase 6 — Hardening**
-- [ ] Storage cleanup: delete raw VOD after job completes (keep clips)
-- [ ] Job timeout (45 min) + beat/reaper + worker OOM guardrails + prod compose override
-- [ ] README polish, smoke test script (`scripts/smoke.sh`: URL → completed job)
+- [x] Storage cleanup: delete raw VOD after job completes (keep clips)
+- [x] Job timeout (45 min) + beat/reaper + worker OOM guardrails + prod compose override
+- [x] README polish, smoke test script (`scripts/smoke.sh`: URL → completed job)
 
 ---
 

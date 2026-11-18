@@ -70,5 +70,22 @@ services:
         "celery",
       ]
 
+  beat:
+    <<: *backend
+    command:
+      [
+        "celery",
+        "-A",
+        "app.workers.celery_app:celery_app",
+        "worker",
+        "-B",
+        "-Q",
+        "reaper",
+        "--concurrency=1",
+        "--loglevel=INFO",
+        "-s",
+        "/tmp/celerybeat-schedule",
+      ]
+
 volumes:
   pgdata:
