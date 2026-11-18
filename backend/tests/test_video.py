@@ -167,6 +167,9 @@ def test_crop_math_nearest_even() -> None:
     assert compute_crop(1920, 1080) == (608, 1080)
     assert compute_crop(1080, 1920) == (1080, 1920)
     assert compute_crop(1920, 1081) == (608, 1080)
+    assert compute_crop(1080, 2340) == (1080, 1920)
+    assert compute_crop(720, 1600) == (720, 1280)
+    assert compute_crop(1081, 2340) == (1080, 1920)
     with pytest.raises(ClipExportError):
         compute_crop(1, 1)
 
@@ -188,17 +191,32 @@ def test_pass_argv_shapes() -> None:
         raw_out=Path("/storage/jobs/x/work/c_raw.mp4"),
     )
     joined = " ".join(cut)
-    assert "crop=608:1080" in joined
-    assert "scale=1080:1920" in joined
+    assert "crop=608:1080,scale=1080:1920:flags=lanczos,setsar=1" in joined
     assert "loudnorm=I=-14:TP=-1.5:LRA=11" in joined
+    assert cut[cut.index("-pix_fmt") + 1] == "yuv420p"
+    assert cut.index("-pix_fmt") < cut.index("-c:v")
     assert "-crf" in cut and cut[cut.index("-crf") + 1] == "20"
     assert cut.index("-ss") < cut.index("-i")
     assert cut.index("-to") < cut.index("-i")
+
+    tall_w, tall_h = compute_crop(1080, 2340)
+    assert (tall_w, tall_h) == (1080, 1920)
+    tall_cut = build_cut_argv(
+        Path("/storage/jobs/x/vod.mp4"),
+        ff_ss=0.0,
+        ff_to=10.0,
+        crop_w=tall_w,
+        crop_h=tall_h,
+        raw_out=Path("/storage/jobs/x/work/tall_raw.mp4"),
+    )
+    assert "crop=1080:1920,scale=1080:1920:flags=lanczos,setsar=1" in " ".join(tall_cut)
 
     clip_id = uuid4()
     burn = build_burn_argv(clip_id)
     assert f"ass={clip_id}.ass" in burn
     assert burn[burn.index("-c:a") + 1] == "copy"
+    assert burn[burn.index("-pix_fmt") + 1] == "yuv420p"
+    assert burn.index("-pix_fmt") < burn.index("-c:v")
     assert burn[-1] == f"../clips/{clip_id}.mp4"
 
 
@@ -385,6 +403,58 @@ def test_render_clip_with_real_ffmpeg(tmp_path: Path) -> None:
     assert (video["width"], video["height"]) == (1080, 1920)
     assert any(s["codec_type"] == "audio" for s in streams)
     assert list((tmp_path / "work").iterdir()) == []
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is not installed")
+def test_render_clip_tall_10bit_source_produces_square_9_16_yuv420p(tmp_path: Path) -> None:
+    vod = tmp_path / "tall.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=360x780:rate=15:duration=2",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+            "-pix_fmt", "yuv420p10le",
+            "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-shortest",
+            str(vod),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    clip_id = uuid4()
+    out = tmp_path / "clips" / f"{clip_id}.mp4"
+    window = _window(start_s=0.2, end_s=1.5, word_start=0, word_end=0)
+    words = [Word(word="tall", start=0.3, end=1.0)]
+
+    render_clip(
+        vod,
+        window,
+        words,
+        tmp_path / "work",
+        out,
+        clip_id=clip_id,
+        dimensions=VideoDimensions(360, 780),
+        duration_s=2.0,
+    )
+
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-print_format", "json",
+            "-show_entries",
+            "stream=codec_type,width,height,sample_aspect_ratio,display_aspect_ratio,pix_fmt",
+            str(out),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    streams = json.loads(probe.stdout)["streams"]
+    video = next(s for s in streams if s["codec_type"] == "video")
+    assert (video["width"], video["height"]) == (1080, 1920)
+    assert video["sample_aspect_ratio"] == "1:1"
+    assert video["display_aspect_ratio"] == "9:16"
+    assert video["pix_fmt"] == "yuv420p"
 
 
 # --- pipeline clipping stage ---------------------------------------------------

@@ -132,15 +132,26 @@ def even_floor(value: int) -> int:
     return value if value % 2 == 0 else value - 1
 
 
+def _nearest_even(value: float) -> int:
+    return ((int(value) + 1) // 2) * 2
+
+
 def compute_crop(width: int, height: int) -> tuple[int, int]:
     """Centered 9:16 crop with even sides.
 
-    Height is floored to even. Width is the nearest even of `crop_h * 9 / 16`
-    (1080 -> 607.5 -> 608, not the floor-to-even 606), capped at the even source width.
+    For 16:9 / wider sources, height is floored to even and width is the nearest even of
+    `crop_h * 9 / 16` (1080 -> 607.5 -> 608). For sources taller than 9:16, width is floored
+    to even and height is reduced to the nearest even of `crop_w * 16 / 9`.
     """
-    crop_h = even_floor(height)
-    nearest_even = ((int(crop_h * 9 / 16) + 1) // 2) * 2
-    crop_w = min(even_floor(width), nearest_even)
+    even_w = even_floor(width)
+    even_h = even_floor(height)
+    nearest_w = _nearest_even(even_h * 9 / 16)
+    if even_w < nearest_w:
+        crop_w = even_w
+        crop_h = min(even_h, _nearest_even(crop_w * 16 / 9))
+    else:
+        crop_w = nearest_w
+        crop_h = even_h
     if crop_w < 2 or crop_h < 2:
         raise ClipExportError("bad dimensions")
     return crop_w, crop_h
@@ -183,9 +194,11 @@ def build_cut_argv(
         "-i",
         str(vod),
         "-vf",
-        f"crop={crop_w}:{crop_h},scale={OUT_WIDTH}:{OUT_HEIGHT}:flags=lanczos",
+        f"crop={crop_w}:{crop_h},scale={OUT_WIDTH}:{OUT_HEIGHT}:flags=lanczos,setsar=1",
         "-af",
         "loudnorm=I=-14:TP=-1.5:LRA=11",
+        "-pix_fmt",
+        "yuv420p",
         "-c:v",
         "libx264",
         "-crf",
@@ -219,6 +232,8 @@ def build_burn_argv(clip_id: UUID) -> list[str]:
         f"ass={clip_id}.ass",
         "-c:a",
         "copy",
+        "-pix_fmt",
+        "yuv420p",
         "-c:v",
         "libx264",
         "-crf",
