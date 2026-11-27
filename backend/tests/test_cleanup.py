@@ -27,7 +27,7 @@ from app.services.storage import (
 )
 from app.workers.celery_app import celery_app
 from app.workers.pipeline import (
-    is_job_in_broker,
+    _broker_job_ids,
     reap_stale_jobs,
     refresh_job_lock,
     release_job_lock,
@@ -218,7 +218,7 @@ def test_reap_stale_jobs_timeout_pass_respects_lock_and_started_at(
         stale_job = session.get(Job, stale_id)
         assert stale_job is not None
         assert stale_job.status == "failed"
-        assert stale_job.error == "This job exceeded the 45 minute limit and was stopped."
+        assert stale_job.error == pipeline_module.TIMEOUT_MESSAGE
         assert not stale_vod.exists()
 
         locked_job = session.get(Job, locked_id)
@@ -278,10 +278,7 @@ def test_reap_stale_jobs_lost_enqueue_and_broker_presence(
             "tag-1",
             json.dumps([json.loads(_make_celery_envelope(str(in_unacked_id))), "", "celery"]),
         )
-        assert is_job_in_broker(r, lost_id) is False
-        assert is_job_in_broker(r, in_celery_id) is True
-        assert is_job_in_broker(r, in_unacked_id) is True
-        assert is_job_in_broker(r, long_wait_id) is True
+        assert _broker_job_ids(r) == {str(in_celery_id), str(in_unacked_id), str(long_wait_id)}
 
         reap_stale_jobs()
     finally:
@@ -291,7 +288,7 @@ def test_reap_stale_jobs_lost_enqueue_and_broker_presence(
         lost_job = session.get(Job, lost_id)
         assert lost_job is not None
         assert lost_job.status == "failed"
-        assert lost_job.error == "Could not start the job. Try again in a moment."
+        assert lost_job.error == pipeline_module.ENQUEUE_FAILED_MESSAGE
 
         for kept_id in (in_celery_id, in_unacked_id, long_wait_id):
             row = session.get(Job, kept_id)
@@ -346,7 +343,7 @@ def test_reap_stale_jobs_redrives_once_then_fails_lost_queued(
         row = session.get(Job, job_id)
         assert row is not None
         assert row.status == "failed"
-        assert row.error == "Could not start the job. Try again in a moment."
+        assert row.error == pipeline_module.ENQUEUE_FAILED_MESSAGE
 
 
 def test_reap_stale_jobs_orphan_media_pass(
@@ -357,7 +354,11 @@ def test_reap_stale_jobs_orphan_media_pass(
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
     monkeypatch.setattr(pipeline_module, "REAPER_RECHECK_SLEEP_S", 0.0)
 
-    job_id = _seed_job(status="completed", attempt=1)
+    monkeypatch.setattr(pipeline_module, "ORPHAN_BATCH_SIZE", 1)
+    job_id, later_id = sorted(_seed_job(status="completed", attempt=1) for _ in range(2))
+    ensure_job_dirs(later_id)
+    later_vod = vod_path(later_id)
+    later_vod.write_bytes(b"leftover-vod")
     ensure_job_dirs(job_id)
     vod = vod_path(job_id)
     vod.write_bytes(b"leftover-vod")
@@ -367,6 +368,9 @@ def test_reap_stale_jobs_orphan_media_pass(
     reap_stale_jobs()
 
     assert not vod.exists()
+    assert later_vod.exists()
+    reap_stale_jobs()
+    assert not later_vod.exists()
     assert clip.exists()
     with SessionLocal() as session:
         row = session.get(Job, job_id)

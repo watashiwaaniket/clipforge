@@ -13,6 +13,7 @@
 # - Killing the worker once (docker compose kill -s KILL worker) resumes the job from valid
 #   artifacts; failure and raw-disk cleanup occur at the 4th delivery attempt cap, the 45-minute
 #   soft limit, or the reaper sweep.
+set +x
 set -euo pipefail
 
 if [[ -z "${SMOKE_API_KEY:-}" ]]; then

@@ -11,5 +11,7 @@ services:
     mem_limit: 4g
     memswap_limit: 4g
   beat:
+    mem_limit: 512m
+    memswap_limit: 512m
     volumes: !override
       - ./storage:/storage

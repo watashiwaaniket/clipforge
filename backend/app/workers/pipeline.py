@@ -163,9 +163,7 @@ def holds_job_lock(job_id: UUID | str, lock_token: str) -> bool:
         if current is None:
             return False
         decoded = (
-            current.decode("utf-8", errors="ignore")
-            if isinstance(current, bytes)
-            else str(current)
+            current.decode("utf-8", errors="ignore") if isinstance(current, bytes) else str(current)
         )
         return decoded == lock_token
     finally:
@@ -675,42 +673,42 @@ def _has_raw_artifacts(job_id: UUID | str) -> bool:
     )
 
 
-def _envelope_matches_process_job(raw: bytes | str, target_job_id: str) -> bool:
+def _broker_job_id(raw: bytes | str) -> str | None:
     try:
         text = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
         parsed = json.loads(text)
     except Exception:
-        return False
+        return None
 
     if isinstance(parsed, list):
         if not parsed:
-            return False
+            return None
         first = parsed[0]
         if isinstance(first, str):
             try:
                 parsed = json.loads(first)
             except Exception:
-                return False
+                return None
         else:
             parsed = first
 
     if not isinstance(parsed, dict):
-        return False
+        return None
 
     headers = parsed.get("headers")
     task_name = headers.get("task") if isinstance(headers, dict) else None
     if task_name is None:
         task_name = parsed.get("task")
     if task_name != "process_job":
-        return False
+        return None
 
     direct_args = parsed.get("args")
     if isinstance(direct_args, list) and direct_args:
-        return str(direct_args[0]) == target_job_id
+        return str(direct_args[0])
 
     body = parsed.get("body")
     if body is None:
-        return False
+        return None
 
     properties = parsed.get("properties")
     body_encoding = properties.get("body_encoding") if isinstance(properties, dict) else None
@@ -722,36 +720,49 @@ def _envelope_matches_process_job(raw: bytes | str, target_job_id: str) -> bool:
             else:
                 body = json.loads(body)
         except Exception:
-            return False
+            return None
 
     if isinstance(body, list) and body:
         first_elem = body[0]
         if isinstance(first_elem, list) and first_elem:
-            return str(first_elem[0]) == target_job_id
+            return str(first_elem[0])
     elif isinstance(body, dict):
         args = body.get("args")
         if isinstance(args, list) and args:
-            return str(args[0]) == target_job_id
+            return str(args[0])
 
-    return False
-
-
-def is_job_in_broker(redis_client: redis.Redis, job_id: UUID | str) -> bool:
-    target_id = str(job_id)
-    if redis_client.exists(_job_lock_key(target_id)):
-        return True
-
-    for raw in redis_client.hvals("unacked"):
-        if _envelope_matches_process_job(raw, target_id):
-            return True
-
-    for raw in redis_client.lrange("celery", 0, -1):
-        if _envelope_matches_process_job(raw, target_id):
-            return True
-
-    return False
+    return None
 
 
+def _broker_job_ids(client: redis.Redis) -> set[str]:
+    with client.pipeline() as pipe:
+        queued, unacked = pipe.lrange("celery", 0, -1).hvals("unacked").execute()
+    return {
+        uid
+        for messages in (queued, unacked)
+        for raw in messages
+        if (uid := _broker_job_id(raw)) is not None
+    }
+
+
+def _missing_jobs(client: redis.Redis, candidates: list[UUID]) -> list[UUID]:
+    for observation in range(2):
+        if not candidates:
+            break
+        if observation:
+            time.sleep(REAPER_RECHECK_SLEEP_S)
+        present = _broker_job_ids(client)
+        candidates = [
+            uid
+            for uid in candidates
+            if str(uid) not in present and not client.exists(_job_lock_key(uid))
+        ]
+    return candidates
+
+
+TIMEOUT_MESSAGE = "This job exceeded the 45 minute limit and was stopped."
+ENQUEUE_FAILED_MESSAGE = "Could not start the job. Try again in a moment."
+ORPHAN_BATCH_SIZE = 256
 ENQUEUE_GRACE_SECONDS = 180
 REDRIVER_TTL_SECONDS = 86_400
 REAPER_RECHECK_SLEEP_S = 1.0
@@ -781,7 +792,7 @@ def reap_stale_jobs() -> None:
             fail_job(
                 uid,
                 "timeout",
-                "This job exceeded the 45 minute limit and was stopped.",
+                TIMEOUT_MESSAGE,
             )
             if not client.exists(_job_lock_key(uid)) and is_terminal(uid):
                 _safe_cleanup_raw(uid)
@@ -797,12 +808,7 @@ def reap_stale_jobs() -> None:
                 )
             ).all()
 
-        for uid in lost_enqueue_ids:
-            if is_job_in_broker(client, uid):
-                continue
-            time.sleep(REAPER_RECHECK_SLEEP_S)
-            if is_job_in_broker(client, uid):
-                continue
+        for uid in _missing_jobs(client, list(lost_enqueue_ids)):
             should_fail_enqueue = False
             with session_scope() as session:
                 job = session.scalar(
@@ -819,7 +825,7 @@ def reap_stale_jobs() -> None:
                 fail_job(
                     uid,
                     "enqueue_failed",
-                    "Could not start the job. Try again in a moment.",
+                    ENQUEUE_FAILED_MESSAGE,
                 )
 
         # 3. Lost-queued pass (enqueued_at IS NOT NULL)
@@ -832,12 +838,7 @@ def reap_stale_jobs() -> None:
                 )
             ).all()
 
-        for uid in lost_queued_ids:
-            if is_job_in_broker(client, uid):
-                continue
-            time.sleep(REAPER_RECHECK_SLEEP_S)
-            if is_job_in_broker(client, uid):
-                continue
+        for uid in _missing_jobs(client, list(lost_queued_ids)):
             should_fail_redrive = False
             with session_scope() as session:
                 job = session.scalar(
@@ -862,14 +863,16 @@ def reap_stale_jobs() -> None:
                 fail_job(
                     uid,
                     "enqueue_failed",
-                    "Could not start the job. Try again in a moment.",
+                    ENQUEUE_FAILED_MESSAGE,
                 )
 
         # 4. Orphan-media pass
         with session_scope() as session:
-            terminal_ids = session.scalars(
-                select(Job.id).where(Job.status.in_(("completed", "failed")))
-            ).all()
+            query = select(Job.id).where(Job.status.in_(("completed", "failed")))
+            cursor = client.get("reaper:orphan_cursor")
+            if cursor:
+                query = query.where(Job.id > UUID(cursor.decode()))
+            terminal_ids = session.scalars(query.order_by(Job.id).limit(ORPHAN_BATCH_SIZE)).all()
 
         for uid in terminal_ids:
             if client.exists(_job_lock_key(uid)):
@@ -879,6 +882,10 @@ def reap_stale_jobs() -> None:
                     _safe_cleanup_raw(uid)
             except Exception:
                 log.exception("cleanup_failed", job_id=str(uid))
+        if len(terminal_ids) == ORPHAN_BATCH_SIZE:
+            client.set("reaper:orphan_cursor", str(terminal_ids[-1]))
+        else:
+            client.delete("reaper:orphan_cursor")
     finally:
         client.close()
 
@@ -900,7 +907,7 @@ def process_job(job_id: str) -> None:
             run_pipeline(job_id, lock_token)
         except SoftTimeLimitExceeded:
             cancel_score_pool()
-            fail_job(job_id, "timeout", "This job exceeded the 45 minute limit and was stopped.")
+            fail_job(job_id, "timeout", TIMEOUT_MESSAGE)
         except ClipForgeError as exc:
             fail_job(job_id, exc.error_code, exc.user_message)
         except Exception:
@@ -919,4 +926,3 @@ def process_job(job_id: str) -> None:
                     _safe_cleanup_raw(job_id)
             finally:
                 release_job_lock(job_id, lock_token)
-
