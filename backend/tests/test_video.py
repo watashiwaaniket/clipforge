@@ -651,17 +651,28 @@ def test_resume_replaces_clip_rows_and_files_from_earlier_attempt(
     stale_work.write_bytes(b"old")
 
     fake_run, _ = _fake_ffmpeg()
-    monkeypatch.setattr("app.services.video.subprocess.run", fake_run)
+    seen_raw_during_render: list[bool] = []
+
+    def tracking_run(argv, **kwargs):
+        seen_raw_during_render.append(
+            (tmp_path / "jobs" / job_id / "vod.mp4").exists()
+            and (tmp_path / "jobs" / job_id / "windows.json").exists()
+        )
+        return fake_run(argv, **kwargs)
+
+    monkeypatch.setattr("app.services.video.subprocess.run", tracking_run)
     process_job(job_id)
 
     clips = _clips_for(job_id)
     assert len(clips) == 1 and clips[0].id != stale_id
+    assert seen_raw_during_render and all(seen_raw_during_render)
     assert not stale_file.exists()
     assert not stale_work.exists()
     assert _job(job_id).status == "completed"
-    # The VOD, transcript, and windows survive (cleanup_raw is still a no-op).
-    assert (tmp_path / "jobs" / job_id / "vod.mp4").exists()
-    assert (tmp_path / "jobs" / job_id / "windows.json").exists()
+    # Raw artifacts are deleted once the job reaches completed, while the new clip remains.
+    assert not (tmp_path / "jobs" / job_id / "vod.mp4").exists()
+    assert not (tmp_path / "jobs" / job_id / "windows.json").exists()
+    assert (tmp_path / "jobs" / job_id / "clips" / f"{clips[0].id}.mp4").exists()
 
 
 def test_soft_time_limit_during_clip_is_not_swallowed(

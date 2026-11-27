@@ -202,18 +202,37 @@ def test_process_job_completes_end_to_end(
 
     monkeypatch.setattr("app.workers.pipeline.run_scoring", fake_run_scoring)
 
+    saved_windows_snapshot: list[ScoredWindow] = []
+    original_run_clipping = pipeline_module.run_clipping
+
+    def spy_run_clipping(uid, lock_token, *, vod, windows, words, duration_s):
+        w_path = tmp_path / "jobs" / str(uid) / "windows.json"
+        assert w_path.exists()
+        saved_windows_snapshot.extend(load_windows(w_path) or [])
+        return original_run_clipping(
+            uid,
+            lock_token,
+            vod=vod,
+            windows=windows,
+            words=words,
+            duration_s=duration_s,
+        )
+
+    monkeypatch.setattr("app.workers.pipeline.run_clipping", spy_run_clipping)
+
     process_job(job_id)
 
     expected_mp4 = tmp_path / "jobs" / job_id / "vod.mp4"
     expected_transcript = tmp_path / "jobs" / job_id / "transcript.json"
     expected_windows = tmp_path / "jobs" / job_id / "windows.json"
     expected_wav = tmp_path / "jobs" / job_id / "audio.wav"
-    assert expected_mp4.exists()
-    assert expected_transcript.exists()
-    assert expected_windows.exists()
+    expected_work = tmp_path / "jobs" / job_id / "work"
+    assert not expected_mp4.exists()
+    assert not expected_transcript.exists()
+    assert not expected_windows.exists()
     assert not expected_wav.exists()
-    loaded_windows = load_windows(expected_windows)
-    assert loaded_windows == [
+    assert not expected_work.exists()
+    assert saved_windows_snapshot == [
         ScoredWindow(
             start_s=0.0,
             end_s=9.6,

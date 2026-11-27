@@ -1876,7 +1876,7 @@ Canary rule for every phase that touches a key: build both canaries by concatena
 - **Depends on:** PR 2, PR 3, PR 7, PR 7b.
 - **Description:** TanStack Query polls the list and the detail query every 2.5s while that query's statuses are active, and only after `session.accessToken` is set. Key panel populated from `GET /api/v1/providers` (supporting optional key for `antigravity`, live model check, and model selection), generate form, Twitch expiry hint, thumbnail on the detail page, clip grid with score, copy, player, download, and literal error text. Same-origin media proxy forwards Range and `Authorization` (using Next.js 15 `await context.params`). `npm test` emits CommonJS and runs `node --test`. CI gains that frontend job. Visual language matches the existing landing tokens.
 
-### PR 9 — `feat: clean storage, time out jobs, and document smoke` (Remaining)
+### PR 9 — `feat: clean storage, time out jobs, and document smoke` (Shipped)
 
 - **Files:** `backend/app/services/storage.py`, `backend/app/workers/pipeline.py`, `backend/app/workers/celery_app.py`, `docker-compose.yml`, `docker-compose.prod.yml`, `scripts/smoke.sh`, `README.md`, `.env.example`, `backend/tests/test_cleanup.py`.
 - **Depends on:** PR 7 and PR 8.

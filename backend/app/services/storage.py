@@ -70,5 +70,20 @@ def has_enough_free_disk() -> bool:
 
 
 def cleanup_raw(job_id: UUID | str) -> None:
-    # PR 9 replaces this no-op with deletion of raw media files.
-    return
+    root = job_dir(job_id)
+    if not root.exists():
+        return
+
+    for match in root.glob("vod.*"):
+        if match.is_dir() and not match.is_symlink():
+            shutil.rmtree(match)
+        else:
+            match.unlink(missing_ok=True)
+
+    for file_path in (audio_path(job_id), transcript_path(job_id), windows_path(job_id)):
+        file_path.unlink(missing_ok=True)
+
+    for dir_path in (chunks_dir(job_id), work_dir(job_id)):
+        if dir_path.exists():
+            shutil.rmtree(dir_path)
+

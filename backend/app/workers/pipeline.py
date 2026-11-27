@@ -1,9 +1,12 @@
+import base64
+import json
 import os
 import shutil
 import socket
 import threading
+import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
@@ -20,7 +23,14 @@ from app.logging import push_secret, secret_boundary
 from app.models import ApiKey, Clip, Job
 from app.security import decrypt_api_key
 from app.services.downloader import probe_and_download, probe_media_duration
-from app.services.jobs import ORDER, fail_job, is_terminal, set_progress, transition_job
+from app.services.jobs import (
+    ACTIVE_JOB_STATUSES,
+    ORDER,
+    fail_job,
+    is_terminal,
+    set_progress,
+    transition_job,
+)
 from app.services.scorer import (
     ScoredWindow,
     cancel_score_pool,
@@ -33,6 +43,7 @@ from app.services.storage import (
     clip_relative_path,
     clips_dir,
     ensure_job_dirs,
+    job_dir,
     transcript_path,
     vod_path,
     windows_path,
@@ -152,9 +163,7 @@ def holds_job_lock(job_id: UUID | str, lock_token: str) -> bool:
         if current is None:
             return False
         decoded = (
-            current.decode("utf-8", errors="ignore")
-            if isinstance(current, bytes)
-            else str(current)
+            current.decode("utf-8", errors="ignore") if isinstance(current, bytes) else str(current)
         )
         return decoded == lock_token
     finally:
@@ -643,6 +652,244 @@ def run_pipeline(job_id: str, lock_token: str) -> None:
     )
 
 
+def _safe_cleanup_raw(job_id: UUID | str) -> None:
+    try:
+        cleanup_raw(job_id)
+    except Exception:
+        log.exception("cleanup_failed", job_id=str(job_id))
+
+
+def _has_raw_artifacts(job_id: UUID | str) -> bool:
+    root = job_dir(job_id)
+    if not root.exists():
+        return False
+    return (
+        any(root.glob("vod.*"))
+        or (root / "audio.wav").exists()
+        or (root / "chunks").exists()
+        or transcript_path(job_id).exists()
+        or windows_path(job_id).exists()
+        or work_dir(job_id).exists()
+    )
+
+
+def _broker_job_id(raw: bytes | str) -> str | None:
+    try:
+        text = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
+        parsed = json.loads(text)
+    except Exception:
+        return None
+
+    if isinstance(parsed, list):
+        if not parsed:
+            return None
+        first = parsed[0]
+        if isinstance(first, str):
+            try:
+                parsed = json.loads(first)
+            except Exception:
+                return None
+        else:
+            parsed = first
+
+    if not isinstance(parsed, dict):
+        return None
+
+    headers = parsed.get("headers")
+    task_name = headers.get("task") if isinstance(headers, dict) else None
+    if task_name is None:
+        task_name = parsed.get("task")
+    if task_name != "process_job":
+        return None
+
+    direct_args = parsed.get("args")
+    if isinstance(direct_args, list) and direct_args:
+        return str(direct_args[0])
+
+    body = parsed.get("body")
+    if body is None:
+        return None
+
+    properties = parsed.get("properties")
+    body_encoding = properties.get("body_encoding") if isinstance(properties, dict) else None
+    if isinstance(body, str):
+        try:
+            if body_encoding == "base64":
+                decoded_bytes = base64.b64decode(body)
+                body = json.loads(decoded_bytes.decode("utf-8"))
+            else:
+                body = json.loads(body)
+        except Exception:
+            return None
+
+    if isinstance(body, list) and body:
+        first_elem = body[0]
+        if isinstance(first_elem, list) and first_elem:
+            return str(first_elem[0])
+    elif isinstance(body, dict):
+        args = body.get("args")
+        if isinstance(args, list) and args:
+            return str(args[0])
+
+    return None
+
+
+def _broker_job_ids(client: redis.Redis) -> set[str]:
+    with client.pipeline() as pipe:
+        queued, unacked = pipe.lrange("celery", 0, -1).hvals("unacked").execute()
+    return {
+        uid
+        for messages in (queued, unacked)
+        for raw in messages
+        if (uid := _broker_job_id(raw)) is not None
+    }
+
+
+def _missing_jobs(client: redis.Redis, candidates: list[UUID]) -> list[UUID]:
+    for observation in range(2):
+        if not candidates:
+            break
+        if observation:
+            time.sleep(REAPER_RECHECK_SLEEP_S)
+        present = _broker_job_ids(client)
+        candidates = [
+            uid
+            for uid in candidates
+            if str(uid) not in present and not client.exists(_job_lock_key(uid))
+        ]
+    return candidates
+
+
+TIMEOUT_MESSAGE = "This job exceeded the 45 minute limit and was stopped."
+ENQUEUE_FAILED_MESSAGE = "Could not start the job. Try again in a moment."
+ORPHAN_BATCH_SIZE = 256
+ENQUEUE_GRACE_SECONDS = 180
+REDRIVER_TTL_SECONDS = 86_400
+REAPER_RECHECK_SLEEP_S = 1.0
+
+
+@celery_app.task(name="reap_stale_jobs")
+def reap_stale_jobs() -> None:
+    now = datetime.now(UTC)
+    timeout_cutoff = now - timedelta(seconds=settings.job_timeout_seconds)
+    enqueue_cutoff = now - timedelta(seconds=ENQUEUE_GRACE_SECONDS)
+
+    client = _redis_client()
+    try:
+        # 1. Running-timeout pass
+        with session_scope() as session:
+            timeout_ids = session.scalars(
+                select(Job.id).where(
+                    Job.status.in_(ACTIVE_JOB_STATUSES),
+                    Job.started_at.is_not(None),
+                    Job.started_at < timeout_cutoff,
+                )
+            ).all()
+
+        for uid in timeout_ids:
+            if client.exists(_job_lock_key(uid)):
+                continue
+            fail_job(
+                uid,
+                "timeout",
+                TIMEOUT_MESSAGE,
+            )
+            if not client.exists(_job_lock_key(uid)) and is_terminal(uid):
+                _safe_cleanup_raw(uid)
+
+        # 2. Lost-enqueue pass (enqueued_at IS NULL)
+        with session_scope() as session:
+            lost_enqueue_ids = session.scalars(
+                select(Job.id).where(
+                    Job.status == "queued",
+                    Job.attempt == 0,
+                    Job.enqueued_at.is_(None),
+                    Job.created_at < enqueue_cutoff,
+                )
+            ).all()
+
+        for uid in _missing_jobs(client, list(lost_enqueue_ids)):
+            should_fail_enqueue = False
+            with session_scope() as session:
+                job = session.scalar(
+                    select(Job).where(Job.id == uid).with_for_update(skip_locked=True)
+                )
+                if (
+                    job is not None
+                    and job.status == "queued"
+                    and job.enqueued_at is None
+                    and job.attempt == 0
+                ):
+                    should_fail_enqueue = True
+            if should_fail_enqueue:
+                fail_job(
+                    uid,
+                    "enqueue_failed",
+                    ENQUEUE_FAILED_MESSAGE,
+                )
+
+        # 3. Lost-queued pass (enqueued_at IS NOT NULL)
+        with session_scope() as session:
+            lost_queued_ids = session.scalars(
+                select(Job.id).where(
+                    Job.status == "queued",
+                    Job.enqueued_at.is_not(None),
+                    Job.enqueued_at < enqueue_cutoff,
+                )
+            ).all()
+
+        for uid in _missing_jobs(client, list(lost_queued_ids)):
+            should_fail_redrive = False
+            with session_scope() as session:
+                job = session.scalar(
+                    select(Job).where(Job.id == uid).with_for_update(skip_locked=True)
+                )
+                if job is None or job.status != "queued":
+                    continue
+                if client.set(f"reaper:redriven:{uid}", "1", nx=True, ex=REDRIVER_TTL_SECONDS):
+                    try:
+                        process_job.delay(str(uid))
+                    except Exception:
+                        client.delete(f"reaper:redriven:{uid}")
+                        log.exception("reaper_redrive_failed", job_id=str(uid))
+                        continue
+                    now_ts = datetime.now(UTC)
+                    job.enqueued_at = now_ts
+                    job.updated_at = now_ts
+                    log.info("job_redriven", job_id=str(uid))
+                else:
+                    should_fail_redrive = True
+            if should_fail_redrive:
+                fail_job(
+                    uid,
+                    "enqueue_failed",
+                    ENQUEUE_FAILED_MESSAGE,
+                )
+
+        # 4. Orphan-media pass
+        with session_scope() as session:
+            query = select(Job.id).where(Job.status.in_(("completed", "failed")))
+            cursor = client.get("reaper:orphan_cursor")
+            if cursor:
+                query = query.where(Job.id > UUID(cursor.decode()))
+            terminal_ids = session.scalars(query.order_by(Job.id).limit(ORPHAN_BATCH_SIZE)).all()
+
+        for uid in terminal_ids:
+            if client.exists(_job_lock_key(uid)):
+                continue
+            try:
+                if _has_raw_artifacts(uid):
+                    _safe_cleanup_raw(uid)
+            except Exception:
+                log.exception("cleanup_failed", job_id=str(uid))
+        if len(terminal_ids) == ORPHAN_BATCH_SIZE:
+            client.set("reaper:orphan_cursor", str(terminal_ids[-1]))
+        else:
+            client.delete("reaper:orphan_cursor")
+    finally:
+        client.close()
+
+
 @celery_app.task(name="process_job", max_retries=0)
 def process_job(job_id: str) -> None:
     decision, lock_token = begin_attempt(job_id)
@@ -660,7 +907,7 @@ def process_job(job_id: str) -> None:
             run_pipeline(job_id, lock_token)
         except SoftTimeLimitExceeded:
             cancel_score_pool()
-            fail_job(job_id, "timeout", "This job exceeded the 45 minute limit and was stopped.")
+            fail_job(job_id, "timeout", TIMEOUT_MESSAGE)
         except ClipForgeError as exc:
             fail_job(job_id, exc.error_code, exc.user_message)
         except Exception:
@@ -676,6 +923,6 @@ def process_job(job_id: str) -> None:
                     and is_terminal(job_id)
                     and holds_job_lock(job_id, lock_token)
                 ):
-                    cleanup_raw(job_id)
+                    _safe_cleanup_raw(job_id)
             finally:
                 release_job_lock(job_id, lock_token)

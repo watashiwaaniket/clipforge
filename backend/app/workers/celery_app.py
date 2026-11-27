@@ -17,11 +17,20 @@ celery_app.conf.update(
     task_ignore_result=True,
     worker_hijack_root_logger=False,
     worker_concurrency=1,
+    worker_max_tasks_per_child=1,
+    worker_max_memory_per_child=2_500_000,
     task_soft_time_limit=settings.job_timeout_seconds,
     task_time_limit=settings.job_timeout_seconds + 60,
     broker_transport_options={"visibility_timeout": 7200},
     task_routes={
         "process_job": {"queue": "celery"},
+        "reap_stale_jobs": {"queue": "reaper"},
+    },
+    beat_schedule={
+        "reap-stale-jobs": {
+            "task": "reap_stale_jobs",
+            "schedule": 60.0,
+        },
     },
     imports=["app.workers.pipeline"],
 )
