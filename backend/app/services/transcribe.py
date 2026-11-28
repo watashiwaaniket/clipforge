@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import wave
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -16,7 +16,7 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from app.config import settings
 from app.errors import NoSpeech, TranscriptionFailed
-from app.logging import secret_scope
+from app.logging import redact, secret_scope
 from app.services.downloader import probe_media_duration
 
 log = structlog.get_logger()
@@ -205,7 +205,10 @@ class FasterWhisperTranscriber:
     language: str
     on_chunk: Callable[[int, int], None] | None = None
 
+    last_chunk_count: int = field(default=0, init=False)
+
     def transcribe(self, audio_path: Path) -> list[Word]:
+        self.last_chunk_count = 0
         from faster_whisper import WhisperModel
 
         try:
@@ -229,10 +232,10 @@ class FasterWhisperTranscriber:
                     rate = source.getframerate()
                     frames_per_chunk = rate * WHISPER_CHUNK_SECONDS
                     frames = source.getnframes()
-                    total = math.ceil(frames / frames_per_chunk)
+                    self.last_chunk_count = math.ceil(frames / frames_per_chunk)
                     for index, start in enumerate(range(0, frames, frames_per_chunk), 1):
                         if self.on_chunk:
-                            self.on_chunk(index, total)
+                            self.on_chunk(index, self.last_chunk_count)
                         with wave.open(str(chunk), "wb") as output:
                             output.setparams(source.getparams())
                             output.writeframes(source.readframes(frames_per_chunk))
@@ -251,6 +254,9 @@ class FasterWhisperTranscriber:
                                         )
                                     )
         except (RuntimeError, ValueError, OSError, wave.Error, subprocess.SubprocessError) as exc:
+            log.error(
+                "local_transcription_failed", error_type=type(exc).__name__, detail=redact(str(exc))
+            )
             raise TranscriptionFailed(
                 "Local transcription failed. Check the model cache and worker logs."
             ) from exc
