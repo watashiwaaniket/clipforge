@@ -20,6 +20,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.execute("DELETE FROM api_keys WHERE provider IN ('codex', 'claude')")
     op.drop_constraint("ck_api_keys_provider", "api_keys", type_="check")
     op.create_check_constraint(
         "ck_api_keys_provider",

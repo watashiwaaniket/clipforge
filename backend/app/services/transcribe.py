@@ -2,6 +2,8 @@ import json
 import math
 import shutil
 import subprocess
+import tempfile
+import wave
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -213,20 +215,42 @@ class FasterWhisperTranscriber:
                 compute_type="int8",
                 download_root=str(Path(settings.storage_dir) / "models" / "faster-whisper"),
             )
-            segments, info = engine.transcribe(
-                str(audio_path), language=self.language or None, word_timestamps=True
-            )
-            words = []
-            last_minute = -1
-            for segment in segments:
-                minute = int(segment.start // 60)
-                if self.on_chunk and minute != last_minute:
-                    self.on_chunk(minute + 1, max(minute + 1, math.ceil(info.duration / 60)))
-                    last_minute = minute
-                for item in segment.words or []:
-                    if item.word.strip() and 0 <= item.start < item.end:
-                        words.append(Word(item.word.strip(), float(item.start), float(item.end)))
-        except (RuntimeError, ValueError, OSError) as exc:
+            words: list[Word] = []
+            with tempfile.TemporaryDirectory(dir=audio_path.parent) as directory:
+                wav = Path(directory) / "audio.wav"
+                subprocess.run(
+                    build_extract_wav_argv(audio_path, wav),
+                    check=True,
+                    capture_output=True,
+                    timeout=WHISPER_FFMPEG_TIMEOUT_S,
+                )
+                chunk = Path(directory) / "chunk.wav"
+                with wave.open(str(wav), "rb") as source:
+                    rate = source.getframerate()
+                    frames_per_chunk = rate * WHISPER_CHUNK_SECONDS
+                    frames = source.getnframes()
+                    total = math.ceil(frames / frames_per_chunk)
+                    for index, start in enumerate(range(0, frames, frames_per_chunk), 1):
+                        if self.on_chunk:
+                            self.on_chunk(index, total)
+                        with wave.open(str(chunk), "wb") as output:
+                            output.setparams(source.getparams())
+                            output.writeframes(source.readframes(frames_per_chunk))
+                        segments, _ = engine.transcribe(
+                            str(chunk), language=self.language or None, word_timestamps=True
+                        )
+                        offset = start / rate
+                        for segment in segments:
+                            for item in segment.words or []:
+                                if item.word.strip() and 0 <= item.start < item.end:
+                                    words.append(
+                                        Word(
+                                            item.word.strip(),
+                                            offset + item.start,
+                                            offset + item.end,
+                                        )
+                                    )
+        except (RuntimeError, ValueError, OSError, wave.Error, subprocess.SubprocessError) as exc:
             raise TranscriptionFailed(
                 "Local transcription failed. Check the model cache and worker logs."
             ) from exc

@@ -335,20 +335,33 @@ def test_transcript_save_and_load_roundtrip_and_invalid_rejected(tmp_path: Path)
 
 def test_local_transcriber_requests_word_timestamps(monkeypatch, tmp_path):
     import sys
+    import wave
     from types import SimpleNamespace
 
     from app.services.transcribe import FasterWhisperTranscriber
 
+    vod = tmp_path / "vod.wav"
+    with wave.open(str(vod), "wb") as audio:
+        audio.setparams((1, 2, 16000, 0, "NONE", ""))
+        audio.writeframes(bytes(64000))
+    monkeypatch.setattr("app.services.transcribe.WHISPER_CHUNK_SECONDS", 1)
+    model_loads = []
+
     class Model:
         def __init__(self, model, *, device, compute_type, download_root):
+            model_loads.append(model)
             assert (model, device, compute_type) == ("base", "cpu", "int8")
 
         def transcribe(self, path, *, word_timestamps, language):
+            with wave.open(path) as audio:
+                assert audio.getnframes() == 16000
             assert word_timestamps and language is None
             word = SimpleNamespace(word=" hello", start=0.2, end=0.6)
             return iter([SimpleNamespace(start=0, words=[word])]), SimpleNamespace(duration=1)
 
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Model))
-    assert FasterWhisperTranscriber("base", "").transcribe(tmp_path / "vod.mp4") == [
-        Word("hello", 0.2, 0.6)
+    assert FasterWhisperTranscriber("base", "").transcribe(vod) == [
+        Word("hello", 0.2, 0.6),
+        Word("hello", 1.2, 1.6),
     ]
+    assert model_loads == ["base"]

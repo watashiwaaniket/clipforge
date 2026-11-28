@@ -111,3 +111,6 @@ Apply the migration with `docker compose exec api alembic upgrade head`.
 Select **Codex ACP** or **Claude ACP** in the dashboard and enter the bridge
 token in the API key field. Model `default` uses the signed-in agent's default.
 Anyone holding this token can submit scoring requests against that host account.
+
+Downgrading below migration 0003 removes saved Codex and Claude bridge credentials.
+Re-enter those credentials after upgrading again. Other providers retain their settings.
