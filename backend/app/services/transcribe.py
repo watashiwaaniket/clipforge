@@ -254,9 +254,11 @@ class FasterWhisperTranscriber:
                                         )
                                     )
         except (RuntimeError, ValueError, OSError, wave.Error, subprocess.SubprocessError) as exc:
-            log.error(
-                "local_transcription_failed", error_type=type(exc).__name__, detail=redact(str(exc))
-            )
+            detail = redact(str(exc))
+            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+                stderr = exc.stderr.decode("utf-8", errors="replace")
+                detail += "\n" + redact(stderr).strip()[-2048:]
+            log.error("local_transcription_failed", error_type=type(exc).__name__, detail=detail)
             raise TranscriptionFailed(
                 "Local transcription failed. Check the model cache and worker logs."
             ) from exc

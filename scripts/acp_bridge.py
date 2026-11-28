@@ -2,11 +2,18 @@
 
 import hmac
 import json
-import logging
 import os
 import subprocess
+import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import structlog
+
+log = structlog.wrap_logger(
+    structlog.PrintLogger(file=sys.stderr),
+    processors=[structlog.processors.add_log_level, structlog.processors.JSONRenderer()],
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -101,7 +108,7 @@ class Handler(BaseHTTPRequestHandler):
                     reason = f"timed out after {exc.timeout}s"
                 elif isinstance(exc, OSError):
                     reason = f"{reason} (errno {exc.errno})"
-                logging.error("ACP %s failed: %s", agent, reason)
+                log.error("acp_agent_failed", agent=agent, reason=reason)
                 self.reply(502, {"error": "ACP agent failed. Check acpx installation and sign-in."})
                 return
         self.reply(

@@ -395,3 +395,29 @@ def test_local_model_error_logs_redacted_cause(
     assert "invalid model header [REDACTED]" in caplog.text
     assert canary not in caplog.text
     assert "invalid model header" not in failure.value.user_message
+
+
+def test_local_ffmpeg_error_logs_redacted_stderr_tail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import sys
+
+    from app.services.transcribe import FasterWhisperTranscriber
+
+    canary = _sk_canary()
+    stderr = b"discarded header" + b"." * 3000 + b"\xff No space left " + canary.encode()
+
+    def fail_extract(argv: list[str], **kwargs: object) -> None:
+        raise subprocess.CalledProcessError(1, argv, stderr=stderr)
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=lambda *a, **kw: object())
+    )
+    monkeypatch.setattr(subprocess, "run", fail_extract)
+    configure_logging()
+    with pytest.raises(TranscriptionFailed) as failure:
+        FasterWhisperTranscriber("base", "").transcribe(tmp_path / "vod.mp4")
+    assert "No space left [REDACTED]" in caplog.text
+    assert "discarded header" not in caplog.text
+    assert canary not in caplog.text
+    assert "No space left" not in failure.value.user_message
