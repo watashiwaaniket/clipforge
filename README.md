@@ -102,9 +102,11 @@ or `acpx --agent claude-agent-acp exec "say hello"`. Choose a private random bri
 least 32 characters. In zsh, start the loopback bridge from the repository root:
 
 ```zsh
+python3 -m venv .venv
+.venv/bin/python -m pip install 'structlog>=24.4'
 read -rs 'ACP_BRIDGE_TOKEN?Private bridge token: '
 export ACP_BRIDGE_TOKEN
-python3 scripts/acp_bridge.py
+.venv/bin/python scripts/acp_bridge.py
 ```
 
 Apply the migration with `docker compose exec api alembic upgrade head`.

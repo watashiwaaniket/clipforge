@@ -333,9 +333,12 @@ def test_transcript_save_and_load_roundtrip_and_invalid_rejected(tmp_path: Path)
     assert load_transcript(path) is None
 
 
-def test_local_transcriber_requests_word_timestamps(monkeypatch, tmp_path):
+def test_local_transcriber_requests_word_timestamps(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     import sys
     import wave
+    from collections.abc import Iterator
     from types import SimpleNamespace
 
     from app.services.transcribe import FasterWhisperTranscriber
@@ -348,11 +351,15 @@ def test_local_transcriber_requests_word_timestamps(monkeypatch, tmp_path):
     model_loads = []
 
     class Model:
-        def __init__(self, model, *, device, compute_type, download_root):
+        def __init__(
+            self, model: str, *, device: str, compute_type: str, download_root: str
+        ) -> None:
             model_loads.append(model)
             assert (model, device, compute_type) == ("base", "cpu", "int8")
 
-        def transcribe(self, path, *, word_timestamps, language):
+        def transcribe(
+            self, path: str, *, word_timestamps: bool, language: str | None
+        ) -> tuple[Iterator[SimpleNamespace], SimpleNamespace]:
             with wave.open(path) as audio:
                 assert audio.getnframes() == 16000
             assert word_timestamps and language is None
@@ -360,8 +367,57 @@ def test_local_transcriber_requests_word_timestamps(monkeypatch, tmp_path):
             return iter([SimpleNamespace(start=0, words=[word])]), SimpleNamespace(duration=1)
 
     monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Model))
-    assert FasterWhisperTranscriber("base", "").transcribe(vod) == [
+    transcriber = FasterWhisperTranscriber("base", "")
+    assert transcriber.transcribe(vod) == [
         Word("hello", 0.2, 0.6),
         Word("hello", 1.2, 1.6),
     ]
+    assert transcriber.last_chunk_count == 2
     assert model_loads == ["base"]
+
+
+def test_local_model_error_logs_redacted_cause(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import sys
+
+    from app.services.transcribe import FasterWhisperTranscriber
+
+    canary = _sk_canary()
+
+    def fail_load(*args: object, **kwargs: object) -> None:
+        raise RuntimeError(f"invalid model header {canary}")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=fail_load))
+    configure_logging()
+    with pytest.raises(TranscriptionFailed) as failure:
+        FasterWhisperTranscriber("base", "").transcribe(tmp_path / "vod.mp4")
+    assert "invalid model header [REDACTED]" in caplog.text
+    assert canary not in caplog.text
+    assert "invalid model header" not in failure.value.user_message
+
+
+def test_local_ffmpeg_error_logs_redacted_stderr_tail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import sys
+
+    from app.services.transcribe import FasterWhisperTranscriber
+
+    canary = _sk_canary()
+    stderr = b"discarded header" + b"." * 3000 + b"\xff No space left " + canary.encode()
+
+    def fail_extract(argv: list[str], **kwargs: object) -> None:
+        raise subprocess.CalledProcessError(1, argv, stderr=stderr)
+
+    monkeypatch.setitem(
+        sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=lambda *a, **kw: object())
+    )
+    monkeypatch.setattr(subprocess, "run", fail_extract)
+    configure_logging()
+    with pytest.raises(TranscriptionFailed) as failure:
+        FasterWhisperTranscriber("base", "").transcribe(tmp_path / "vod.mp4")
+    assert "No space left [REDACTED]" in caplog.text
+    assert "discarded header" not in caplog.text
+    assert canary not in caplog.text
+    assert "No space left" not in failure.value.user_message

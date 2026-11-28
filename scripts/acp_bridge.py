@@ -4,8 +4,16 @@ import hmac
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import structlog
+
+log = structlog.wrap_logger(
+    structlog.PrintLogger(file=sys.stderr),
+    processors=[structlog.processors.add_log_level, structlog.processors.JSONRenderer()],
+)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -75,7 +83,32 @@ class Handler(BaseHTTPRequestHandler):
                     check=True,
                     env={k: v for k, v in os.environ.items() if k != "ACP_BRIDGE_TOKEN"},
                 )
-            except (OSError, subprocess.SubprocessError):
+            except (OSError, subprocess.SubprocessError) as exc:
+                # Agent output may echo credentials or the transcript. Log only known
+                # diagnostic markers and process metadata.
+                reason = type(exc).__name__
+                if isinstance(exc, subprocess.CalledProcessError):
+                    stderr = (exc.stderr or "").lower()
+                    marker = next(
+                        (
+                            label
+                            for label in (
+                                "unauthorized",
+                                "not authenticated",
+                                "not found",
+                                "permission denied",
+                                "rate limit",
+                            )
+                            if label in stderr
+                        ),
+                        "agent exited",
+                    )
+                    reason = f"{marker} (exit {exc.returncode})"
+                elif isinstance(exc, subprocess.TimeoutExpired):
+                    reason = f"timed out after {exc.timeout}s"
+                elif isinstance(exc, OSError):
+                    reason = f"{reason} (errno {exc.errno})"
+                log.error("acp_agent_failed", agent=agent, reason=reason)
                 self.reply(502, {"error": "ACP agent failed. Check acpx installation and sign-in."})
                 return
         self.reply(
