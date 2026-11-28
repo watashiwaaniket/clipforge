@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from http import HTTPStatus
@@ -264,13 +265,14 @@ def make_handler(state: BridgeState) -> type[BaseHTTPRequestHandler]:
             cmd.extend(["--print", prompt])
 
             try:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=timeout_s,
-                )
+                with tempfile.TemporaryDirectory() as workspace:
+                    proc = subprocess.run(
+                        cmd, cwd=workspace,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=timeout_s,
+                    )
             except subprocess.TimeoutExpired:
                 self._send_json(
                     HTTPStatus.GATEWAY_TIMEOUT,

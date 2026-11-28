@@ -12,6 +12,7 @@ import structlog
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
+from app.config import settings
 from app.errors import NoSpeech, TranscriptionFailed
 from app.logging import secret_scope
 from app.services.downloader import probe_media_duration
@@ -194,6 +195,44 @@ def load_transcript(path: Path) -> list[Word] | None:
             return None
         words.append(Word(word=w.strip(), start=start, end=end))
     return words
+
+
+@dataclass
+class FasterWhisperTranscriber:
+    model: str
+    language: str
+    on_chunk: Callable[[int, int], None] | None = None
+
+    def transcribe(self, audio_path: Path) -> list[Word]:
+        from faster_whisper import WhisperModel
+
+        try:
+            engine = WhisperModel(
+                self.model,
+                device="cpu",
+                compute_type="int8",
+                download_root=str(Path(settings.storage_dir) / "models" / "faster-whisper"),
+            )
+            segments, info = engine.transcribe(
+                str(audio_path), language=self.language or None, word_timestamps=True
+            )
+            words = []
+            last_minute = -1
+            for segment in segments:
+                minute = int(segment.start // 60)
+                if self.on_chunk and minute != last_minute:
+                    self.on_chunk(minute + 1, max(minute + 1, math.ceil(info.duration / 60)))
+                    last_minute = minute
+                for item in segment.words or []:
+                    if item.word.strip() and 0 <= item.start < item.end:
+                        words.append(Word(item.word.strip(), float(item.start), float(item.end)))
+        except (RuntimeError, ValueError, OSError) as exc:
+            raise TranscriptionFailed(
+                "Local transcription failed. Check the model cache and worker logs."
+            ) from exc
+        if not words:
+            raise NoSpeech()
+        return words
 
 
 class WhisperApiTranscriber:

@@ -193,6 +193,7 @@ export function DashboardClient() {
       ? probedAntigravity.default_model
       : selectedProvider.default_model;
 
+  const usesAcpBridge = ["codex", "claude"].includes(selectedProvider.id);
   const antigravityConnected =
     selectedProvider.id === "antigravity"
       ? (probedAntigravity?.connected ?? selectedProvider.connected)
@@ -478,6 +479,8 @@ export function DashboardClient() {
                         <p className="mt-2 font-mono text-[11px] text-muted">
                           {antigravityConnected
                             ? "Live session detected"
+                            : (probedAntigravity?.model_source ?? selectedProvider.model_source) === "bridge_error"
+                              ? "Bridge reached, but model discovery failed. Check agy sign-in and bridge settings."
                             : selectedProvider.id === "antigravity"
                               ? "No local CLI/bridge detected yet — start local bridge or paste an OAuth token."
                               : "Local Ollama not reachable yet — default http://host.docker.internal:11434/v1"}
@@ -491,7 +494,9 @@ export function DashboardClient() {
                           htmlFor="api-key"
                           className="block font-mono text-xs uppercase tracking-wider text-muted"
                         >
-                          {selectedProvider.requires_api_key
+                          {usesAcpBridge
+                            ? "ACP bridge token"
+                            : selectedProvider.requires_api_key
                             ? "API Key"
                             : "OAuth Token / JSON (optional)"}
                         </label>
@@ -515,7 +520,9 @@ export function DashboardClient() {
                         value={apiKeyInput}
                         onChange={(e) => setApiKeyInput(e.target.value)}
                         placeholder={
-                          selectedProvider.requires_api_key
+                          usesAcpBridge
+                            ? "Local ACP bridge token"
+                            : selectedProvider.requires_api_key
                             ? "sk-..."
                             : "Leave blank to use local agy CLI / bridge / OAuth"
                         }

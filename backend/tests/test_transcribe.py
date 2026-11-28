@@ -331,3 +331,24 @@ def test_transcript_save_and_load_roundtrip_and_invalid_rejected(tmp_path: Path)
 
     path.write_text(json.dumps([{"word": "ok", "start": 2.0, "end": 1.0}]), encoding="utf-8")
     assert load_transcript(path) is None
+
+
+def test_local_transcriber_requests_word_timestamps(monkeypatch, tmp_path):
+    import sys
+    from types import SimpleNamespace
+
+    from app.services.transcribe import FasterWhisperTranscriber
+
+    class Model:
+        def __init__(self, model, *, device, compute_type, download_root):
+            assert (model, device, compute_type) == ("base", "cpu", "int8")
+
+        def transcribe(self, path, *, word_timestamps, language):
+            assert word_timestamps and language is None
+            word = SimpleNamespace(word=" hello", start=0.2, end=0.6)
+            return iter([SimpleNamespace(start=0, words=[word])]), SimpleNamespace(duration=1)
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Model))
+    assert FasterWhisperTranscriber("base", "").transcribe(tmp_path / "vod.mp4") == [
+        Word("hello", 0.2, 0.6)
+    ]

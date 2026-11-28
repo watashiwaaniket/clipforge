@@ -50,6 +50,7 @@ from app.services.storage import (
     work_dir,
 )
 from app.services.transcribe import (
+    FasterWhisperTranscriber,
     Transcriber,
     WhisperApiTranscriber,
     Word,
@@ -306,7 +307,7 @@ def _select_whisper_key(user_id: UUID) -> str:
 
     raise TranscriptionFailed(
         "Transcription needs an OpenAI Whisper key on the server, or an OpenAI key saved in "
-        "your account. Other providers can score clips but cannot transcribe in this build.",
+        "your account. Set TRANSCRIPTION_BACKEND=auto to enable local transcription.",
         error_code="transcribe_failed",
     )
 
@@ -317,6 +318,8 @@ def build_transcriber(
     language: str,
     on_chunk: Callable[[int, int], None] | None = None,
 ) -> Transcriber:
+    if not api_key:
+        return FasterWhisperTranscriber(settings.faster_whisper_model, language, on_chunk)
     return WhisperApiTranscriber(api_key, language=language, on_chunk=on_chunk)
 
 
@@ -559,9 +562,16 @@ def run_pipeline(job_id: str, lock_token: str) -> None:
             set_progress(uid, f"Transcribing speech ({chunk_num}/{total_chunks})")
             refresh_job_lock(uid, lock_token)
 
-        whisper_key = _select_whisper_key(user_id)
+        whisper_key = ""
+        if settings.transcription_backend != "faster-whisper":
+            try:
+                whisper_key = _select_whisper_key(user_id)
+            except TranscriptionFailed:
+                if settings.transcription_backend == "openai":
+                    raise
         try:
-            push_secret(whisper_key)
+            if whisper_key:
+                push_secret(whisper_key)
             transcriber = build_transcriber(
                 whisper_key,
                 language=settings.whisper_language,

@@ -138,9 +138,13 @@ docker compose logs -f worker
 # Frontend only (expects backend at localhost:8000)
 cd frontend && npm install && npm run dev
 
-# Tests (run inside compose network where `db` and `redis` resolve)
+# Backend lint & tests (run inside compose network where `db` and `redis` resolve)
 docker compose up -d db redis api
+docker compose exec -T api ruff check app tests
 docker compose exec -T api pytest
+
+# Frontend tests, typecheck & build
+cd frontend && npm test && npx tsc --noEmit && npm run build
 
 # Migrations
 docker compose exec api alembic upgrade head

@@ -20,6 +20,8 @@ from app.schemas import (
 from app.security import encrypt_api_key
 from app.services.providers import (
     ANTIGRAVITY_PROVIDER,
+    AntigravityApiError,
+    AntigravityCliError,
     ProviderConfigError,
     ResolvedProviderConfig,
     build_antigravity_provider,
@@ -100,9 +102,7 @@ def upsert_api_key(
                 detail=str(exc),
             ) from exc
 
-        if body.provider == ANTIGRAVITY_PROVIDER and (
-            body.model is None or not body.model.strip()
-        ):
+        if body.provider == ANTIGRAVITY_PROVIDER and (body.model is None or not body.model.strip()):
             resolved = ResolvedProviderConfig(
                 provider=resolved.provider,
                 base_url=resolved.base_url,
@@ -124,6 +124,17 @@ def upsert_api_key(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(exc),
             ) from exc
+        except (AntigravityApiError, AntigravityCliError) as exc:
+            timed_out = getattr(exc, "status_code", None) == 504 or "timed out" in str(exc).lower()
+            detail = (
+                "Antigravity validation timed out. Retry after the CLI warms up."
+                if timed_out
+                else "Antigravity validation failed. Check the CLI sign-in and bridge."
+            )
+            if not is_local_antigravity:
+                detail = "Could not validate the Antigravity OAuth credential."
+            log.warning("antigravity_validation_failed", timed_out=timed_out)
+            raise HTTPException(status_code=400, detail=detail) from exc
         except Exception as exc:
             log.warning(
                 "key_validation_failed",
@@ -133,7 +144,11 @@ def upsert_api_key(
             )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="That key was rejected by the provider.",
+                detail=(
+                    "ACP validation failed. Check the bridge, its token, and agent sign-in."
+                    if resolved.provider in {"codex", "claude"}
+                    else "That key was rejected by the provider."
+                ),
             ) from exc
 
         encrypted = encrypt_api_key(plaintext_key)

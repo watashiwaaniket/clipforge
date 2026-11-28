@@ -84,3 +84,30 @@ Put Caddy in front of `127.0.0.1:8000` (`reverse_proxy 127.0.0.1:8000`) and set 
 - No `faster-whisper` implementation (only the `Transcriber` interface), S3/R2 object storage, or external metrics database.
 
 See [docs/README.md](docs/README.md) for user guides, internal architecture notes, and design specs, and [AGENTS.md](AGENTS.md) for contributor/agent rules.
+
+### Transcription without an OpenAI key
+
+The worker automatically uses faster-whisper on CPU when no Whisper key is
+configured. Set `TRANSCRIPTION_BACKEND=faster-whisper` to force local inference,
+or `openai` to require hosted transcription. The first local job downloads
+`FASTER_WHISPER_MODEL` (default `base`) into the persistent storage volume.
+Rebuild with `docker compose up --build -d` after updating.
+
+### Codex and Claude scoring via ACP (local Docker Desktop)
+
+Install the host client and adapters with
+`npm install -g acpx@0.23.0 @agentclientprotocol/codex-acp@2.12.1 @agentclientprotocol/claude-agent-acp@0.113.0`
+and sign in to the chosen agent. Test it with `acpx --agent codex-acp exec "say hello"`
+or `acpx --agent claude-agent-acp exec "say hello"`. Choose a private random bridge token of at
+least 32 characters. In zsh, start the loopback bridge from the repository root:
+
+```zsh
+read -rs 'ACP_BRIDGE_TOKEN?Private bridge token: '
+export ACP_BRIDGE_TOKEN
+python3 scripts/acp_bridge.py
+```
+
+Apply the migration with `docker compose exec api alembic upgrade head`.
+Select **Codex ACP** or **Claude ACP** in the dashboard and enter the bridge
+token in the API key field. Model `default` uses the signed-in agent's default.
+Anyone holding this token can submit scoring requests against that host account.

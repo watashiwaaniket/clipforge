@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -18,6 +20,8 @@ class Settings(BaseSettings):
     max_concurrent_jobs: int = 3
     max_jobs_per_day: int = 10
     job_timeout_seconds: int = 2700
+    transcription_backend: Literal["auto", "openai", "faster-whisper"] = "auto"
+    faster_whisper_model: str = "base"
     whisper_language: str = "en"
     trust_proxy_count: int = 0
     min_free_disk_bytes: int = 8 * 1024 * 1024 * 1024

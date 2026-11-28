@@ -20,6 +20,15 @@ class ProviderPreset:
 
 
 PROVIDER_PRESETS: dict[str, ProviderPreset] = {
+    **{
+        agent: ProviderPreset(
+            default_base_url=f"http://host.docker.internal:11437/{agent}/v1",
+            default_model="default",
+            locked_base_url=True,
+            url_policy=OLLAMA_LOCAL_HTTP_POLICY,
+        )
+        for agent in ("codex", "claude")
+    },
     "openai": ProviderPreset(
         default_base_url="https://api.openai.com/v1",
         default_model="gpt-4o-mini",
