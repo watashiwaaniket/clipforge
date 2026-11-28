@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -32,7 +33,7 @@ ANTIGRAVITY_DEFAULT_MODEL = "gemini-4-hydrogen"
 GOOGLE_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
 LOCAL_CREDENTIAL_SENTINELS = frozenset({"", "local", "cli", "oauth", "antigravity-local"})
 DEFAULT_CLI_TIMEOUT_S = 30.0
-CLI_VALIDATION_TIMEOUT_S = 15.0
+CLI_VALIDATION_TIMEOUT_S = 45.0
 BRIDGE_PROBE_TIMEOUT = httpx.Timeout(1.5, connect=1.0)
 _MODEL_LINE_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._:-]+)\s{2,}(.+?)\s*$")
 
@@ -653,13 +654,15 @@ class AntigravityProvider:
 
         timeout_s = self._timeout_seconds(timeout_override)
         try:
-            proc = self._cli_runner(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=timeout_s,
-            )
+            with tempfile.TemporaryDirectory() as workspace:
+                proc = self._cli_runner(
+                    cmd,
+                    cwd=workspace,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=timeout_s,
+                )
         except subprocess.TimeoutExpired as exc:
             raise AntigravityCliError("Antigravity CLI timed out.", retryable=True) from exc
         except OSError as exc:
@@ -922,7 +925,7 @@ def build_antigravity_provider(
     )
 
 
-MODEL_DISCOVERY_TIMEOUT = httpx.Timeout(5.0, connect=2.0)
+MODEL_DISCOVERY_TIMEOUT = httpx.Timeout(20.0, connect=2.0)
 
 
 def list_antigravity_models(
@@ -1016,7 +1019,8 @@ def list_antigravity_models(
         except Exception:
             pass
 
-    return list(FALLBACK_ANTIGRAVITY_MODELS), "fallback", False
+    source = "bridge_error" if bridge_url is not None else "fallback"
+    return list(FALLBACK_ANTIGRAVITY_MODELS), source, False
 
 
 def choose_antigravity_default_model(

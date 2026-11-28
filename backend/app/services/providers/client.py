@@ -16,6 +16,8 @@ def build_openai_client(
     http_client: httpx.Client | None = None,
     http_client_factory: Callable[..., httpx.Client] = httpx.Client,
 ) -> tuple[httpx.Client, OpenAI]:
+    if provider in {"codex", "claude"}:
+        timeout = httpx.Timeout(105, connect=5)
     validated_url = check_outbound_url(base_url, provider=provider)
     if http_client is not None and getattr(http_client, "follow_redirects", False):
         raise ProviderConfigError("HTTP client must disable redirects.")

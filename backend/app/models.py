@@ -39,7 +39,8 @@ class ApiKey(Base):
     __tablename__ = "api_keys"
     __table_args__ = (
         CheckConstraint(
-            "provider IN ('openai', 'groq', 'together', 'ollama', 'compatible', 'antigravity')",
+            "provider IN ('openai', 'groq', 'together', 'ollama', 'compatible', "
+            "'antigravity', 'codex', 'claude')",
             name="ck_api_keys_provider",
         ),
     )

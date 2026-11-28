@@ -291,6 +291,7 @@ def test_select_whisper_key_precedence(clean_db: None, monkeypatch: pytest.Monke
     )
     assert _select_whisper_key(uid_groq) == "sk-operator-fallback-9999"
 
+    monkeypatch.setattr(settings, "transcription_backend", "openai")
     # 3. Groq user key with empty operator key fails before constructing client.
     monkeypatch.setattr(settings, "openai_api_key", "")
     factory_called = False
@@ -322,7 +323,7 @@ def test_select_whisper_key_precedence(clean_db: None, monkeypatch: pytest.Monke
         assert job.status == "failed"
         assert job.error == (
             "Transcription needs an OpenAI Whisper key on the server, or an OpenAI key saved in "
-            "your account. Other providers can score clips but cannot transcribe in this build."
+            "your account. Set TRANSCRIPTION_BACKEND=auto to enable local transcription."
         )
 
     # 4. Corrupt OpenAI ciphertext raises InvalidStoredKey instead of falling back.

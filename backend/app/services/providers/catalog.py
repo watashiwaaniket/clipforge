@@ -20,6 +20,8 @@ _PROVIDER_DISPLAY_NAMES: dict[str, str] = {
     "ollama": "Ollama",
     "compatible": "OpenAI-Compatible",
     "antigravity": "Antigravity",
+    "codex": "Codex ACP",
+    "claude": "Claude ACP",
 }
 
 _STATIC_PROVIDER_MODELS: dict[str, tuple[ProviderModelInfo, ...]] = {
@@ -53,6 +55,8 @@ _STATIC_PROVIDER_MODELS: dict[str, tuple[ProviderModelInfo, ...]] = {
         ProviderModelInfo(id="llama3.2", name="Llama 3.2"),
         ProviderModelInfo(id="qwen2.5", name="Qwen 2.5"),
     ),
+    "codex": (ProviderModelInfo(id="default", name="Agent default"),),
+    "claude": (ProviderModelInfo(id="default", name="Agent default"),),
     "compatible": (),
 }
 
@@ -63,6 +67,8 @@ _PROVIDER_ORDER: tuple[str, ...] = (
     "ollama",
     "compatible",
     "antigravity",
+    "codex",
+    "claude",
 )
 
 

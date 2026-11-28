@@ -32,7 +32,9 @@ class AuthConfigResponse(BaseModel):
 class ApiKeyUpsertRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    provider: Literal["openai", "groq", "together", "ollama", "compatible", "antigravity"]
+    provider: Literal[
+        "openai", "groq", "together", "ollama", "compatible", "antigravity", "codex", "claude"
+    ]
     api_key: SecretStr | None = Field(default=None, max_length=4096)
     base_url: str | None = Field(default=None, max_length=512)
     model: str | None = Field(default=None, max_length=200)

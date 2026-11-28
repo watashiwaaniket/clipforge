@@ -53,7 +53,15 @@ def _mock_dns(
 def test_package_exports_expected_symbols() -> None:
     for name in providers.__all__:
         assert hasattr(providers, name)
-    assert set(PROVIDER_PRESETS) == {"openai", "groq", "together", "ollama", "compatible"}
+    assert set(PROVIDER_PRESETS) == {
+        "openai",
+        "groq",
+        "together",
+        "ollama",
+        "compatible",
+        "codex",
+        "claude",
+    }
 
 
 @pytest.mark.parametrize(

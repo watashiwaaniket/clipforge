@@ -418,12 +418,12 @@ def test_keys_api_persists_antigravity_without_api_key_and_redacts_oauth_tokens(
             json={"provider": "antigravity", "api_key": canary},
         )
     assert fail_res.status_code == 400
-    assert fail_res.json() == {"detail": "That key was rejected by the provider."}
+    assert fail_res.json() == {"detail": "Could not validate the Antigravity OAuth credential."}
     assert canary not in fail_res.text
 
     logs = "\n".join(record.getMessage() for record in caplog.records)
     assert canary not in logs
-    assert "[REDACTED]" in logs
+    assert "antigravity_validation_failed" in logs
 
 
 def test_score_transcript_with_antigravity_retries_and_heuristic_fallback(
@@ -780,6 +780,8 @@ def test_providers_catalog_endpoints_and_auto_default_key_save(
         "ollama",
         "compatible",
         "antigravity",
+        "codex",
+        "claude",
     ]
     agy = providers_by_id["antigravity"]
     assert agy["requires_api_key"] is False
@@ -881,9 +883,9 @@ def test_bridge_request_timeout_has_headroom_and_local_secrets_are_bounded(
         provider.validate_credentials()
         assert seen_timeouts[-1] == {
             "connect": 5.0,
-            "read": 17.0,
-            "write": 17.0,
-            "pool": 17.0,
+            "read": 47.0,
+            "write": 47.0,
+            "pool": 47.0,
         }
 
     # Ensure secret_boundary prevents local-mode bridge/OAuth push_secret from leaking on thread
@@ -972,7 +974,7 @@ def test_oauth_refresh_invalid_json_and_short_discovery_timeout(
     assert connected is True
     assert source == "oauth_live"
     assert [m.id for m in models] == ["gemini-4-hydrogen"]
-    assert seen_client_timeouts == [httpx.Timeout(5.0, connect=2.0)]
+    assert seen_client_timeouts == [httpx.Timeout(20.0, connect=2.0)]
 
     # Non-JSON token refresh payload raises ProviderConfigError cleanly
     expired_creds = json.dumps(
